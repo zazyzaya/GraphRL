@@ -60,7 +60,7 @@ class Q_Walker(ABC):
         self.num_walks = num_walks
         
         if edata == None:
-            edata = torch.full(data.edge_index[0].size(), 1, dtype=torch.int),
+            edata = torch.full(data.edge_index[0].size(), 1, dtype=torch.int)
         
         # CSR matrices make it easier to calculate neighbors
         self.csr = csr_matrix((
@@ -142,7 +142,7 @@ class Q_Walker(ABC):
         if len(neighbors) == 0:
             return nid
         
-        actions = self.encode_actions(neighbors, nid=nid)
+        actions = self.encode_actions(neighbors)
         
         if not return_value and egreedy and random.random() < self.epsilon(self.episode_cnt):
             action = np.random.choice(neighbors)    
@@ -406,4 +406,4 @@ def example(sample_size=50, epochs=200):
     
         
 if __name__ == '__main__':
-    example(epochs=300)
+    example(epochs=100)
