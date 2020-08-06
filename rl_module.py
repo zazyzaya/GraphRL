@@ -2,6 +2,7 @@ import torch
 import random 
 import numpy as np
 
+from copy import deepcopy
 from tqdm import tqdm
 from joblib import Parallel, delayed
 from abc import ABC, abstractmethod
@@ -50,6 +51,8 @@ class Q_Walker(ABC):
         else:
             self.qNet = network
             
+        
+        self.qNet_theta_negative = deepcopy(self.qNet)
         self.data = data
         
         self.episode_cnt = 1
@@ -80,20 +83,48 @@ class Q_Walker(ABC):
         pass
     
     '''
+    A few built-in reward functions to play with
+    '''
+    def min_similarity_reward(self, s,a,s_prime,nid):
+        return s.logical_xor(s_prime).sum()
+    
+    def max_similarity_reward(self, s,a,s_prime,nid):
+        return s.logical_and(s_prime).sum()
+    
+    def max_degree_reward(self, s,a,s_prime,nid):
+        return (self.data.edge_index[0,:] == nid).sum()
+    
+    '''
     Given a state, and a chosen action, returns the next state, s' that
     the module will transition to upon taking that action.
     
     By default, just returns the one-hot encoding of the next node to explore
     '''
-    def state_transition(self,s,a=None):
-        one_hot_state = torch.zeros((self.state_feats), dtype=torch.float)
+    def state_transition(self, s,a=None):
+        return self.state_transition_one_hot(s,a=None)
+    
+    def state_transition_node_feats(self, s,a=None):
+        if a == None:
+            return self.data.x[s]
+        
+        return self.data.x[a]
+    
+    def state_transition_one_hot(self, s,a=None):
+        ret = torch.zeros(self.data.x.size()[0], dtype=torch.float)
         
         if a == None:
-            one_hot_state[s] = 1
+            ret[s]=1
+            return ret
         else:
-            one_hot_state[a] = 1
-            
-        return one_hot_state
+            ret[a]=1
+            return ret
+    
+    
+    def state_transition_combine(self, s,a=None):
+        if a == None:
+            return self.data.x[s]
+        
+        return (self.data.x[a].logical_or(s)).float()
     
     '''
     Given a list of neighbors, encode them. As of right now, 
@@ -104,7 +135,14 @@ class Q_Walker(ABC):
         for a in range(len(acts)):
             actions[a][acts[a]] = 1
             
-        return actions            
+        return actions  
+    
+    '''
+    Can override the above method with this one to use node feats
+    as actions
+    '''
+    def encode_actions_node_feats(self, actions):
+        return self.data.x[torch.tensor(actions, dtype=torch.long)]                  
     
     '''
     Takes a node feature, and puts it at the a'th index,
@@ -115,13 +153,24 @@ class Q_Walker(ABC):
     
     TODO make this work with more than one state at a time?
     '''
-    def Q(self,s,a):    
+    def Q(self,s,a,theta_negative=False):    
         if len(s.size()) == 1:
             s = s.unsqueeze(dim=0)
         if s.size()[0] != a.size()[0]:
             s = s.expand(a.size()[0], s.size()[1])
-            
-        return self.qNet(s,a)
+          
+        # So loss function doesn't explode
+        if theta_negative:
+            return self.qNet_theta_negative(s,a)
+        else:  
+            return self.qNet(s,a)
+        
+    '''
+    Want to keep the network Q* uses stationary for faster
+    convergence. Only update it every few epochs
+    '''
+    def reparameterize_Q(self):
+        self.qNet_theta_negative = deepcopy(self.qNet)
     
     '''
     Estimate for updating Q policy
@@ -147,7 +196,7 @@ class Q_Walker(ABC):
         if not return_value and egreedy and random.random() < self.epsilon(self.episode_cnt):
             action = np.random.choice(neighbors)    
         else:
-            value_predictions = self.Q(s,actions)
+            value_predictions = self.Q(s,actions,theta_negative=True)
             
             # We can also use this function to calculate max(a) Q(s,a)
             if return_value:
@@ -201,7 +250,7 @@ class Q_Walker(ABC):
                 s = self.state_transition(s,a=a)
                 
                 # String so w2v can use it
-                walk.append(nid)
+                walk.append(a)
             walks.append([str(w) for w in walk])
             
         return walks
@@ -346,29 +395,27 @@ class RW_Encoder():
             
     
 # Example 
-class Q_Walk_Feat_Similarity(Q_Walker):
+class Q_Walk_Example(Q_Walker):
     def __init__(self, data, gamma=0.99, epsilon=lambda x: 0.5, episode_len=10,
-                 num_walks=10, hidden=64):
+                 num_walks=10, hidden=64, state_feats=None, action_feats=None):
         
         # Set state and action feats to be dim of node features
-        super().__init__(data, state_feats=data.x.size()[1], action_feats=data.x.size()[1], 
+        super().__init__(data, state_feats=state_feats, action_feats=action_feats, 
                          gamma=gamma, epsilon=epsilon, episode_len=episode_len, 
                          num_walks=num_walks, hidden=hidden)        
     
-    # Want to minimize the similarity of nodes walked to
+    
     def reward(self, s,a,s_prime,nid):
-        return s.logical_xor(s_prime).sum()
+        return self.min_similarity_reward(s,a,s_prime,nid)
     
     def state_transition(self, s,a=None):
-        if a == None:
-            return self.data.x[s]
-        
-        return self.data.x[a]
+        return self.state_transition_node_feats(s,a)
     
     def encode_actions(self, actions):
-        return self.data.x[torch.tensor(actions, dtype=torch.long)]        
+        return self.encode_actions_node_feats(actions)
+        
 
-def example(sample_size=50, epochs=200):
+def example(sample_size=50, epochs=200, clip=10, reparam=10):
     import load_cora as lc
     data = lc.load_data()
     
@@ -380,25 +427,40 @@ def example(sample_size=50, epochs=200):
     # are taken into account for the overall reward value. Here, we set gamma to 0 because
     # future steps don't really matter for the example this is basically a TD(1) agent 
     # with the set of rules we gave it
-    Agent = Q_Walk_Feat_Similarity(data, episode_len=5, num_walks=100, epsilon=lambda x : 0.95, gamma=0.5)
+    Agent = Q_Walk_Example(data, episode_len=5, num_walks=100, 
+                           epsilon=lambda x : 0.95, gamma=0.5,
+                           state_feats=data.x.size()[1], 
+                           action_feats=data.x.size()[1])
     Encoder = RW_Encoder(Agent)
     
     # While training, set it to randomly walk to generate a diverse
     # set of states to learn from 
-    Agent.epsilon = lambda x : 0
-    Agent.gamma = 0.8
+    Agent.gamma = 0.99
+    eps = 0
+    goal_eps = 0.95
+    loss_int = float('inf')
     
-    opt = torch.optim.Adam(Agent.parameters(), lr=1e-2)
+    opt = torch.optim.Adadelta(Agent.parameters())#, lr=1e-2)
     for e in range(epochs):
+        Agent.epsilon = lambda x : eps
+        if loss_int < reparam:
+            print("Updating Q(-theta)")
+            Agent.reparameterize_Q()
+            
         b = np.random.choice(non_orphans, (sample_size), replace=False)
         
         s,a,r = Agent.episode(batch=b, workers=8, quiet=True)
         opt.zero_grad()
         loss = F.mse_loss(Agent.Q(s,a), r)
         loss.backward()
+        
+        #torch.nn.utils.clip_grad_norm_(Agent.parameters(), clip)
         opt.step()
         
-        print("[%d]: %0.4f" % (e, loss.item()))
+        loss_int = loss.item()
+        eps += goal_eps / epochs 
+    
+        print("[%d]: %0.4f" % (e, loss_int))
         
     
     Agent.num_walks = 10
@@ -406,4 +468,4 @@ def example(sample_size=50, epochs=200):
     
         
 if __name__ == '__main__':
-    example(epochs=100)
+    example(epochs=800, sample_size=200, reparam=500)
