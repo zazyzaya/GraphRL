@@ -112,10 +112,10 @@ class Q_Walker(ABC):
         return s.logical_and(s_prime).sum()
     
     def max_degree_reward(self, s,a,s_prime,nid):
-        return (self.data.edge_index[0,:] == nid).sum()
+        return torch.tensor([self.csr[a].indices.shape[0]])
     
     def min_degree_reward(self, s,a,s_prime,nid):
-        return 1 / (self.data.edge_index[0,:] == nid).sum()
+        return 1 / (self.max_degree_reward(s,a,s_prime,nid))
     
     '''
     Given a state, and a chosen action, returns the next state, s' that
@@ -432,6 +432,7 @@ class RW_Encoder():
         if walks == None:
             walks = self.generate_walks(batch=batch, workers=w2v_params['workers'], random=random, weighted=weighted)
             
+        print(walks[0])
         model = Word2Vec(walks, **w2v_params)
         
         idx_order = torch.tensor([int(i) for i in model.wv.index2entity], dtype=torch.long)
@@ -442,12 +443,15 @@ class RW_Encoder():
     
     def compare_to_random(self, batch, w2v_params={}, multiclass=False):
         # Test against policy weighted walks
+        print("Generating policy weighted walks")
         wX, wy = self.encode_nodes(batch=batch, weighted=True, w2v_params=w2v_params)
         
         # Generate policy guided walks
+        print("Generating policy guided walks")
         pX, py = self.encode_nodes(batch=batch, w2v_params=w2v_params)
         
         # Test against random walk embeddings
+        print("Generating policy ")
         rX, ry = self.encode_nodes(batch=batch, random=True, w2v_params=w2v_params)
 
         if multiclass:
@@ -518,20 +522,24 @@ class Q_Walk_Simplified(Q_Walker):
             return super().encode_actions(actions)
         
 
-def train_loop(Agent, data, sample_size=50, epochs=200, clip=None, 
-                  reparam=40, lr=1e-4, verbose=1, early_stopping=10):
+def train_loop(Agent, sample_size=50, clip=None, decreasing_param=False,
+                  reparam=40, lr=1e-4, verbose=1, early_stopping=10,
+                  training_wl=1, gamma_depth=None):
     
     # While training, look at each node in isolation with a random action
     nw = Agent.num_walks
     wl = Agent.episode_len
     eps = Agent.epsilon
+    gamma = Agent.gamma 
     
     Agent.num_walks = 1
-    Agent.episode_len = 1
+    
+    # If the history of a walk is encoded into the state make this higher
+    Agent.episode_len = training_wl 
     Agent.epsilon = lambda x : 0
     
     # Get rid of nodes without neighbors
-    non_orphans = (degree(data.edge_index[0], num_nodes=data.num_nodes) != 0).nonzero()
+    non_orphans = (degree(Agent.data.edge_index[0], num_nodes=Agent.data.num_nodes) != 0).nonzero()
     non_orphans = non_orphans.T.numpy()[0]
     
     # Just need to learn the reward for individual nodes and the best neighbor 
@@ -539,24 +547,53 @@ def train_loop(Agent, data, sample_size=50, epochs=200, clip=None,
     tot_loss = float('inf')
     is_early_stopping = False
     reparammed = False
+    
+    # Don't use discount factor until we have a pretty good estimate of the 
+    # immidiate reward
+    Agent.gamma = 0
+    gamma_active = False
+    distance_learned = 1
+    gamma_depth = gamma_depth if gamma_depth else wl
+    
+    e = 0
     opt = torch.optim.Adam(Agent.parameters(), lr=1e-2)
-    for e in range(epochs):
+    while True: 
+        # Let the agent learn the immidiate rewards first
+        if is_early_stopping and not gamma_active:
+            Agent.gamma = gamma
+            gamma_active = True
+            
+            # Also turn lr way down to help learn slower
+            #for p in opt.param_groups:
+            #    p['lr'] = 1e-4
+        
         if tot_loss < reparam:
             # Don't want to stop right after a param update
             # Make sure the model knows to fit to the updated one as well as it 
             # was fit earlier before halting
-            if is_early_stopping:
+            if is_early_stopping and distance_learned >= gamma_depth:
                 if reparammed:
                     print("Early stopping")
                     break
                 else:
                     reparammed = True
             
-            print("Updating Q(-theta)")
-            Agent.reparameterize_Q()
+            if Agent.use_frozen_q:
+                print("Updating Q(-theta) [gamma^%d]" % distance_learned)
+                Agent.reparameterize_Q()
             
             # Dont reparam again until at least loss is that low
-            reparam = tot_loss
+            if decreasing_param:
+                reparam = tot_loss
+                
+            # We can think of every time we reparam after the base 
+            # estimates are learned as increasing n in the discrete Bellman 
+            # equation: R(s,a) + Sum_{i=0}^n gamma^i * Q(s_i, s_{i+1})
+            # Thus, it only makes sense to allow it to reparam as many times 
+            # as the walk length is (see early stopping condition). Any longer is
+            # mostly a waste of time
+            if gamma_active:
+                distance_learned += 1
         
         if sample_size:    
             b = np.array_split(non_orphans, non_orphans.shape[0]//sample_size)
@@ -566,7 +603,7 @@ def train_loop(Agent, data, sample_size=50, epochs=200, clip=None,
         tot_loss = 0
         steps = 0
         for batch in b:
-            s,a,r = Agent.episode(batch=batch, workers=8, quiet=True)
+            s,a,r = Agent.episode(batch=batch, workers=1, quiet=True if verbose < 1 else False)
             opt.zero_grad()
             loss = F.mse_loss(Agent.Q(s,a), r)
             loss.backward()
@@ -584,8 +621,11 @@ def train_loop(Agent, data, sample_size=50, epochs=200, clip=None,
         print("[%d]: %0.4f" % (e, tot_loss))
         
         if tot_loss <= early_stopping:
-            print("Preparing for early stopping")
+            if not gamma_active:
+                print("Activating discount factor")
             is_early_stopping = True
+            
+        e += 1
         
     # Set parameters back when returning agent
     Agent.num_walks = nw

@@ -53,8 +53,12 @@ def load_blog():
     edges = pd.read_csv(BLOG + 'edges.csv', names=['src', 'dst'])
     groups = pd.read_csv(BLOG + 'group-edges.csv', names=['usr', 'group'])
     
+    src = edges['src'].to_list()
+    dst = edges['dst'].to_list()
+    
     # Nid's start at 1 so subtract 1 from everything
-    ei = torch.tensor([edges['src'], edges['dst']], dtype=torch.long)
+    ei = torch.tensor([ src + dst, 
+                        dst + src], dtype=torch.long)
     ei = ei - 1
     
     # Takes max nid from src and dst, then uses max of those two 
@@ -69,5 +73,3 @@ def load_blog():
         y=y,
         num_nodes=num_nodes
     )
-
-load_blog()
