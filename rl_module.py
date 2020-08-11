@@ -634,7 +634,7 @@ def train_loop(Agent, sample_size=50, clip=None, decreasing_param=False,
     
     return non_orphans
 
-def example(sample_size=50, epochs=200, clip=None, reparam=40,
+def example(sample_size=50, clip=None, reparam=40,
             gamma=0.99, nw=10, wl=5):
     import load_graphs as lg
     data = lg.load_cora()
@@ -646,11 +646,11 @@ def example(sample_size=50, epochs=200, clip=None, reparam=40,
 
     Encoder = RW_Encoder(Agent)
     
-    non_orphans = train_loop(Agent, data, epochs=epochs, sample_size=sample_size, 
+    non_orphans = train_loop(Agent, sample_size=sample_size, 
                              reparam=reparam, clip=clip)    
     
     Encoder.compare_to_random(non_orphans)
     
         
 if __name__ == '__main__':
-    example(epochs=100, sample_size=400)
+    example(sample_size=400)
