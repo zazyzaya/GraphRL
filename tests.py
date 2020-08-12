@@ -4,7 +4,7 @@ import pickle as pkl
 import torch.nn.functional as F
 
 from torch_geometric.utils import degree
-from rl_module import Q_Walk_Simplified, RW_Encoder, train_loop 
+from rl_module import Q_Walk_Simplified, RW_Encoder, train_loop, fast_train_loop
 
 class QW_Cora(Q_Walk_Simplified):
     def __init__(self, data, gamma=0.99, epsilon=lambda x: 0.5, episode_len=10,
@@ -15,7 +15,7 @@ class QW_Cora(Q_Walk_Simplified):
         self.max_degree = degree(data.edge_index[0]).max()
         
     def reward(self, s,a,s_prime,nid):
-        return super().min_degree_reward(s,a,s_prime,nid)
+        return super().min_similarity_reward(s,a,s_prime,nid)
     
 
 def cora(sample_size=50, clip=None, reparam=40,
@@ -34,14 +34,27 @@ def cora(sample_size=50, clip=None, reparam=40,
                              reparam=0.05, clip=clip, decreasing_param=False,
                              verbose=0, gamma_depth=10)    
     
-    Encoder.compare_to_random(non_orphans, w2v_params={'size': 128})
+    Encoder.compare_to_random(non_orphans, w2v_params={'size': 128}, fast_walks=True)
     return Agent
   
+def cora_fast(wl=5, nw=10, gamma=0.99, eps=0.95):
+    print("Testing the CORA dataset")
+    data = lg.load_cora()
+    
+    # Set up a basic agent 
+    Agent = QW_Cora(data, episode_len=wl, num_walks=nw, 
+                           epsilon=lambda x : eps, gamma=gamma,
+                           hidden=1028, one_hot=True)
+
+    Encoder = RW_Encoder(Agent)
+    
+    non_orphans = fast_train_loop(Agent, verbose=0, early_stopping=1e-2, epochs=200, nw=3)    
+    
+    Encoder.compare_to_random(non_orphans, w2v_params={'size': 128}, fast_walks=True)
+    return Agent
 
 def test_cora():  
-    # Using original n2v parameters
-    Agent = cora(sample_size=800, gamma=0.9999, epsilon=0.5, reparam=600,
-                nw=10, wl=80)
+    Agent = cora_fast(gamma=0.9999, eps=0.75, nw=80)
 
 test_cora()
 
