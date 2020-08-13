@@ -2,6 +2,7 @@ import torch
 import random 
 import numpy as np
 
+from torch_scatter import scatter_mean
 from copy import deepcopy
 from tqdm import tqdm
 from joblib import Parallel, delayed
@@ -129,6 +130,9 @@ class Q_Walker(ABC):
     
     def min_degree_reward(self, s,a,s_prime,nid):
         return 1 / (self.max_degree_reward(s,a,s_prime,nid))
+    
+    def euclidean_dist_reward(self, s,a,s_prime,nid):
+        return torch.mean((s-s_prime)**2, dim=1, keepdim=True)
     
     '''
     Given a state, and a chosen action, returns the next state, s' that
@@ -279,7 +283,7 @@ class Q_Walker(ABC):
     the agent is on at time t, this is the more efficient way to generate
     walks for word2vec
     '''
-    def fast_walks(self, nids, egreedy=True, weighted_rand=False):
+    def fast_walks(self, nids, egreedy=True, weighted_rand=False, silent=False):
         if egreedy or weighted_rand:
             Q = self._get_q_table(nids)
         if len(nids.size()) == 1:
@@ -287,13 +291,18 @@ class Q_Walker(ABC):
         
         walks = []
         node = nids
-        for _ in tqdm(range(self.num_walks), desc='Walks generated'):
+        for _ in tqdm(range(self.num_walks), desc='Walks generated', disable=silent):
             walk = [nids]
             for _ in range(self.episode_len):
                 if egreedy and random.random() < self.epsilon(None):
                     node = Q[node.squeeze()].argmax(dim=1, keepdim=True)
                 elif weighted_rand:
-                    node = torch.multinomial(Q[node.squeeze()], num_samples=1)
+                    # Since all scores are relatively similar, make the 
+                    # difference more pronounced 
+                    prob_distro = Q[node.squeeze()]
+                    prob_distro = prob_distro - prob_distro[prob_distro > 0].min()
+                    
+                    node = torch.multinomial(F.relu(prob_distro)+1e-10, num_samples=1)
                 else:
                     node = torch.multinomial(self._get_dense_adj()[node.squeeze()], num_samples=1)
                 
@@ -410,17 +419,26 @@ class Q_Walker(ABC):
         # Copy the random walks nw times (repeat is memory efficient, doesn't
         # actually use nw * t memory, it just makes new pointers or something)
         if len(batch) == 0:
-            nids = torch.tensor([range(self.data.num_nodes)]).repeat(nw)
+            batch = torch.tensor([range(self.data.num_nodes)])
         else:
-            nids = torch.tensor(batch).repeat(nw)
+            batch = torch.tensor(batch)
 
         # Builds or retrieves the adj matrix            
         adj = self._get_dense_adj()
         
-        s = self.state_transition(nids)
-        state = s
-        action = None
-        rewards = []
+        # Take one random step to learn from
+        state = self.state_transition(batch)
+        nids = torch.multinomial(adj[batch], num_samples=1).squeeze()
+        action = self.encode_actions(nids)
+        
+        # Starting state is next step
+        s = self.state_transition(state, a=nids).repeat((nw,1))
+        a = action.repeat((nw,1))
+        nids = nids.repeat(nw)
+        idx = torch.tensor(range(batch.size()[0])).repeat(nw)
+        
+        # And add reward for initial random step
+        rewards = [self.reward(state.repeat((nw,1)), nids, s, batch.repeat(nw))]
           
         for _ in range(wl):
             # Randomly sample an action. By using the adj matrix as the 
@@ -435,17 +453,16 @@ class Q_Walker(ABC):
             nids = a
             a = self.encode_actions(nids)
             s = s_prime
-            
-            # Save the first action taken. All actions that follow are used
-            # only to compute the future (discounted) rewards
-            if action == None:
-                action = a
         
         rewards = torch.cat(rewards, dim=1)    
         
-        discount = torch.tensor([self.gamma ** i for i in range(wl)])
+        discount = torch.tensor([self.gamma ** i for i in range(wl+1)])
         rewards *= discount
-        return state, action, rewards.sum(dim=1, keepdim=True)
+        rewards = rewards.sum(dim=1, keepdim=True)
+        
+        # Then find average reward of random walks
+        rewards = scatter_mean(rewards.T, idx).T
+        return state, action, rewards
         
     
     '''
@@ -649,7 +666,7 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
     
     
     is_early_stopping = False
-    opt = torch.optim.Adadelta(Agent.parameters())#, lr=1e-2)
+    opt = torch.optim.Adam(Agent.parameters(), lr=1e-3, weight_decay=1e-4)
     for e in range(epochs):
         if sample_size:    
             b = np.array_split(non_orphans, non_orphans.shape[0]//sample_size)
@@ -668,7 +685,7 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
                 torch.nn.utils.clip_grad_norm_(Agent.parameters(), clip)
             
             if sample_size:
-                print("\t[%d-%d]: %0.4f" % (e,steps,loss.item()))
+                print("\t[%d-%d]: %0.5f" % (e,steps,loss.item()))
             
             opt.step()
             tot_loss += loss.item()
@@ -677,7 +694,7 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
         if sample_size:
             tot_loss = tot_loss/steps
         
-        print("[%d]: %0.4f" % (e, tot_loss))
+        print("[%d]: %0.5f" % (e, tot_loss))
         
         if tot_loss <= early_stopping:
             print("Early stopping")
