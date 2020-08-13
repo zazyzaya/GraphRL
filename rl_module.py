@@ -500,7 +500,23 @@ from sklearn.linear_model import LogisticRegression as LR
 class RW_Encoder():
     def __init__(self, walker):
         self.walker = walker 
+    
+    def generate_walks_fast(self, batch=[], egreedy=False, weighted=True, 
+                            silent=True):
+        if batch == []:
+            batch = range(self.walker.data.num_nodes)
         
+        if type(batch) != torch.Tensor:
+            batch = torch.tensor(batch)
+        
+        print("Generating walks")
+        return self.walker.fast_walks(
+            batch,
+            egreedy=egreedy, 
+            weighted_rand=weighted,
+            silent=silent
+        )
+    
     def generate_walks(self, batch=[], workers=-1, random=False, 
                        egreedy=True, quiet=False, include_labels=False,
                        weighted=False):
