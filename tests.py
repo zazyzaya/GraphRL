@@ -68,7 +68,8 @@ def cora_fast(wl=5, nw=10, gamma=0.99, eps=0.95, early_stopping=0.1):
         Agent, 
         verbose=0, 
         early_stopping=early_stopping, 
-        epochs=200
+        epochs=200,
+        nw=3
     )    
     
     Encoder.compare_to_random(
@@ -81,10 +82,10 @@ def cora_fast(wl=5, nw=10, gamma=0.99, eps=0.95, early_stopping=0.1):
 
 def test_cora():  
     Agent = cora_fast(
-        gamma=0.999999, 
+        gamma=0.99999, 
         eps=0.75, 
         nw=10, 
-        wl=80,
+        wl=10,
         early_stopping=0.01
     )
 

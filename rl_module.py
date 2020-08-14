@@ -283,7 +283,7 @@ class Q_Walker(ABC):
     the agent is on at time t, this is the more efficient way to generate
     walks for word2vec
     '''
-    def fast_walks(self, nids, egreedy=True, weighted_rand=False, silent=False):
+    def fast_walks(self, nids, egreedy=True, weighted_rand=False, silent=False, strings=True):
         if egreedy or weighted_rand:
             Q = self._get_q_table(nids)
         if len(nids.size()) == 1:
@@ -309,7 +309,13 @@ class Q_Walker(ABC):
                 walk.append(node)
             
             walk = torch.cat(walk, dim=1)
-            walks += [[str(item.item()) for item in one_walk] for one_walk in walk]
+            if strings:
+                walks += [[str(item.item()) for item in one_walk] for one_walk in walk]
+            else:
+                walks.append(walk)
+        
+        if not strings:
+            walks = torch.cat(walks, dim=0)
         
         return walks 
     
@@ -501,20 +507,37 @@ class RW_Encoder():
     def __init__(self, walker):
         self.walker = walker 
     
-    def generate_walks_fast(self, batch=[], egreedy=False, weighted=True, 
-                            silent=True):
+    def generate_walks_fast(self, batch=[], walk_type='weighted', silent=True, strings=False):
         if batch == []:
             batch = range(self.walker.data.num_nodes)
         
         if type(batch) != torch.Tensor:
             batch = torch.tensor(batch)
         
+        if walk_type == 'random':
+            egreedy=False
+            weighted=False
+        
+        elif walk_type == 'weighted':
+            egreedy=False
+            weighted=True
+        
+        elif walk_type == 'egreedy':
+            egreedy=True
+            weighted=False
+            
+        else:
+            raise ValueError(
+                'RW_Encoder.generate_walks_fast argument `walk_type` must be '
+                + '"weighted", "egreedy", or "random"\n\nRecieved "%s"' % walk_type)
+        
         print("Generating walks")
         return self.walker.fast_walks(
             batch,
             egreedy=egreedy, 
             weighted_rand=weighted,
-            silent=silent
+            silent=silent,
+            strings=strings
         )
     
     def generate_walks(self, batch=[], workers=-1, random=False, 
@@ -611,7 +634,7 @@ class RW_Encoder():
             estimator = lambda : OVR(LR(), n_jobs=16)
             y_trans = lambda y : y 
         else:
-            estimator = lambda : LR(n_jobs=16)
+            estimator = lambda : LR(n_jobs=16, max_iter=1000)
             y_trans = lambda y : y.argmax(axis=1)
 
         lr = estimator()
@@ -674,16 +697,15 @@ class Q_Walk_Simplified(Q_Walker):
         else:
             return super().encode_actions(actions)
         
-
+import time 
 def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1, 
-                    early_stopping=0.05, epochs=800, nw=None):
+                    early_stopping=0.05, epochs=800, nw=None, wl=None):
     non_orphans = (degree(Agent.data.edge_index[0], num_nodes=Agent.data.num_nodes) != 0).nonzero()
     non_orphans = non_orphans.T.numpy()[0]
     
-    
-    is_early_stopping = False
     opt = torch.optim.Adam(Agent.parameters(), lr=1e-3, weight_decay=1e-4)
     for e in range(epochs):
+        start = time.time()
         if sample_size:    
             b = np.array_split(non_orphans, non_orphans.shape[0]//sample_size)
         else:
@@ -692,7 +714,7 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
         steps = 0
         tot_loss = 0
         for batch in b:
-            s,a,r = Agent.fast_episode_generation(batch=batch, nw=nw)
+            s,a,r = Agent.fast_episode_generation(batch=batch, nw=nw, wl=wl)
             opt.zero_grad()
             loss = F.mse_loss(Agent.Q(s,a), r)
             loss.backward()
@@ -710,7 +732,7 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
         if sample_size:
             tot_loss = tot_loss/steps
         
-        print("[%d]: %0.5f" % (e, tot_loss))
+        print("[%d]: %0.5f \t\t(%0.4f s.)" % (e, tot_loss, time.time()-start))
         
         if tot_loss <= early_stopping:
             print("Early stopping")

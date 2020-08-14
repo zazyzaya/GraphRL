@@ -1,0 +1,124 @@
+50 epochs
+X -> 64 -> 32
+GCN with Random Walks result:
+              precision    recall  f1-score   support
+
+           0       0.77      0.81      0.79       108
+           1       0.90      0.89      0.90       103
+           2       0.47      0.61      0.53        33
+           3       0.55      0.75      0.63        48
+           4       0.71      0.71      0.71        76
+           5       0.83      0.76      0.80       210
+           6       0.65      0.56      0.60        99
+
+    accuracy                           0.75       677
+   macro avg       0.70      0.73      0.71       677
+weighted avg       0.76      0.75      0.75       677
+
+GCN with Reinforcement Learning walks:
+              precision    recall  f1-score   support
+
+           0       0.73      0.86      0.79        97
+           1       0.95      0.97      0.96       106
+           2       0.62      0.78      0.69        32
+           3       0.59      0.81      0.68        36
+           4       0.73      0.90      0.81        68
+           5       0.88      0.75      0.81       233
+           6       0.69      0.55      0.61       105
+
+    accuracy                           0.79       677
+   macro avg       0.74      0.80      0.77       677
+weighted avg       0.80      0.79      0.79       677
+
+100 epochs
+GCN with Random Walks result:
+              precision    recall  f1-score   support
+
+           0       0.70      0.67      0.68       103
+           1       0.93      0.94      0.93       108
+           2       0.76      0.74      0.75       109
+           3       0.71      0.80      0.75        44
+           4       0.87      0.82      0.84       198
+           5       0.70      0.83      0.76        36
+           6       0.78      0.82      0.80        79
+
+    accuracy                           0.80       677
+   macro avg       0.78      0.80      0.79       677
+weighted avg       0.80      0.80      0.80       677
+
+GCN with Reinforcement Learning walks:
+              precision    recall  f1-score   support
+
+           0       0.62      0.72      0.66        81
+           1       0.93      0.93      0.93       110
+           2       0.72      0.80      0.76        92
+           3       0.84      0.79      0.81        52
+           4       0.87      0.80      0.83       232
+           5       0.70      0.71      0.71        49
+           6       0.80      0.77      0.78        61
+
+    accuracy                           0.80       677
+   macro avg       0.78      0.79      0.78       677
+weighted avg       0.81      0.80      0.80       677
+
+X -> 128 -> 64
+GCN with Random Walks result:
+              precision    recall  f1-score   support
+
+           0       0.67      0.76      0.71        68
+           1       0.80      0.90      0.85        52
+           2       0.90      0.80      0.85       196
+           3       0.77      0.92      0.83        96
+           4       0.56      0.55      0.55        33
+           5       0.95      0.92      0.94       126
+           6       0.68      0.61      0.64       106
+
+    accuracy                           0.80       677
+   macro avg       0.76      0.78      0.77       677
+weighted avg       0.81      0.80      0.80       677
+
+GCN with Reinforcement Learning walks:
+              precision    recall  f1-score   support
+
+           0       0.72      0.86      0.78        69
+           1       0.72      0.87      0.79        47
+           2       0.89      0.83      0.86       214
+           3       0.76      0.81      0.79       102
+           4       0.60      0.83      0.70        35
+           5       0.98      0.88      0.93       114
+           6       0.71      0.59      0.65        96
+
+    accuracy                           0.81       677
+   macro avg       0.77      0.81      0.78       677
+weighted avg       0.82      0.81      0.81       677
+
+X -> 256 -> 128
+GCN with Random Walks result:
+              precision    recall  f1-score   support
+
+           0       0.07      1.00      0.14         3
+           1       0.90      0.94      0.92       108
+           2       0.78      0.78      0.78        49
+           3       0.51      0.87      0.64        60
+           4       0.91      0.60      0.73       302
+           5       0.51      0.63      0.57        63
+           6       0.53      0.54      0.53        92
+
+    accuracy                           0.69       677
+   macro avg       0.60      0.77      0.61       677
+weighted avg       0.77      0.69      0.71       677
+
+GCN with Reinforcement Learning walks:
+              precision    recall  f1-score   support
+
+           0       0.02      1.00      0.04         1
+           1       0.93      0.79      0.85       117
+           2       0.74      0.84      0.78        37
+           3       0.42      0.68      0.52        63
+           4       0.89      0.61      0.72       305
+           5       0.60      0.80      0.69        66
+           6       0.56      0.55      0.55        88
+
+    accuracy                           0.67       677
+   macro avg       0.59      0.75      0.59       677
+weighted avg       0.77      0.67      0.70       677

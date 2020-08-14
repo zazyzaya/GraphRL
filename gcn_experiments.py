@@ -21,8 +21,8 @@ from rl_module import *
 class GCN(torch.nn.Module):
     def __init__(self):
         super(GCN, self).__init__()
-        self.conv1 = GCNConv(data.x.size()[1], 32)
-        self.conv2 = GCNConv(32, 16)
+        self.conv1 = GCNConv(data.x.size()[1], 128)
+        self.conv2 = GCNConv(128,64)
 
     def forward(self):
         x, edge_index, edge_weight = data.x, data.edge_index, data.weights
@@ -64,6 +64,41 @@ def gen_aux_train_data(walks):
     neg_nodes = np.array(neg_nodes)
     return context_pairs, neg_nodes
 
+def gen_aux_train_data_tensors(walks):
+    print("Generating pos samples")
+    context_pairs = []
+    for i in range(walks.size()[1]):
+        for j in range(walks.size()[1]):
+            if i == j:
+                continue
+            context_pairs.append(walks[:, torch.tensor([i,j])])
+    
+    context_pairs = torch.cat(context_pairs, dim=0)
+    
+    # Encode tuples for fast lookup to make sure negative samples
+    # aren't present. Convert from tuple to unique int and store as a set
+    exp = torch.tensor([walks.max().item(), 1])
+    encode = lambda x : (x*exp).sum(axis=1)
+    encoded_pairs = set([encode.item() for encode in (context_pairs*exp).sum(axis=1)])
+    
+    print("Generating neg samples")
+    num_neg_samples = 5
+    neg_samples = torch.tensor(
+        np.random.choice(non_orphans, size=(context_pairs.size()[0]*num_neg_samples,2))
+    )
+    
+    print("Removing false-neg samples")
+    non_dupes = []
+    for enc in tqdm(encode(neg_samples)):
+        non_dupes.append(enc.item() not in encoded_pairs)
+        
+    neg_samples = neg_samples[non_dupes, :]
+    
+    print("Sampling the correct num of neg samples")
+    neg_samples = neg_samples[:context_pairs.size()[0], :]
+    
+    return context_pairs.numpy(), neg_samples.numpy()
+
 # Skip-gram like Unsupervised loss based on similarity of context pairs and dissimilarity of neg samples
 def GCN_unsup_loss(embeds, context_pairs, neg_samples):
     input_embeds = embeds[context_pairs[:,0]]
@@ -89,7 +124,7 @@ def GCN_train(epochs, model, optimizer, context_pairs, neg_nodes):
         model.train()
         optimizer.zero_grad()
         # Get node embeddings
-        forward_pass = model_rw.forward()
+        forward_pass = model.forward()
         loss = GCN_unsup_loss(forward_pass, context_pairs, neg_nodes)
         l = loss.item()
         print("Epoch %d: Loss: %2f" % (e, l))
@@ -103,13 +138,21 @@ class QW_Cora(Q_Walk_Simplified):
         super().__init__(data, gamma=gamma, epsilon=epsilon, episode_len=episode_len,
                          num_walks=num_walks, hidden=hidden, one_hot=one_hot, network=network)
 
-        self.max_degree = degree(data.edge_index[0]).max()
-
+        self.cs = torch.nn.CosineSimilarity()
+        
     def reward(self, s,a,s_prime,nid):
-        return super().min_similarity_reward(s,a,s_prime,nid)
+        return self.cs(self.data.x[nid],self.data.x[a]).unsqueeze(-1)
 
+from sklearn.decomposition import PCA
+def preprocess(X):
+    decomp = PCA(n_components=256, random_state=1337)
+    return torch.tensor(decomp.fit_transform(X.numpy()))
 
-def train_RL_walker(gamma=0.99,eps=0.75,nw=10,wl=5,early_stopping=0.01):
+def train_RL_walker(gamma=0.99,eps=0.75,nw=10,wl=5,early_stopping=0.03):
+    # Preprocessing data
+    print("Preprocessing data")
+    data.x = preprocess(data.x)
+    
     # Set up a basic agent 
     Agent = QW_Cora(
         data, episode_len=wl, num_walks=nw,
@@ -124,7 +167,7 @@ def train_RL_walker(gamma=0.99,eps=0.75,nw=10,wl=5,early_stopping=0.01):
         verbose=1,
         early_stopping=early_stopping,
         nw=nw,
-        epochs=5
+        epochs=100
     )
 
     return Encoder, non_orphans
@@ -136,7 +179,7 @@ print("Loading cora data...")
 data = lg.load_cora()
 
 # Number of epochs.. Used for GCN training
-epochs=50
+epochs=100
 
 # Set up a basic agent 
 print("Training RL walker...")
@@ -144,19 +187,19 @@ Encoder, non_orphans = train_RL_walker(nw=10,wl=5)
 
 # Generate some policy walks and random walks for comparison:
 print("Generating policy-based walks...")
-policy_walks = Encoder.generate_walks(batch=non_orphans, workers=4)
+policy_walks = Encoder.generate_walks_fast(batch=non_orphans, strings=False, walk_type='weighted')
 print("Generating random walks...")
-random_walks = Encoder.generate_walks(batch=non_orphans, random=True, workers=4)
+random_walks = Encoder.generate_walks_fast(batch=non_orphans, walk_type='random', strings=False)
 
 # lets start with the random walks
 print("Generating aux data for unsupervised GCN training w/ random walks...")
-context_pairs, neg_nodes = gen_aux_train_data(random_walks)
+context_pairs, neg_nodes = gen_aux_train_data_tensors(random_walks)
 # Build the model
 model_rw = GCN()
 optimizer_rw = torch.optim.Adam([
     dict(params=model_rw.conv1.parameters(), weight_decay=5e-4),
-    dict(params=model_rw.conv2.parameters(), weight_decay=0)
-], lr=0.01)  # Only perform weight-decay on first convolution.
+    dict(params=model_rw.conv2.parameters(), weight_decay=5e-4)
+], lr=0.001)  # Only perform weight-decay on first convolution.
 
 # Train it
 print("Training GCN w/ random walks...")
@@ -164,12 +207,12 @@ GCN_train(epochs, model_rw, optimizer_rw, context_pairs, neg_nodes)
 
 # Now the RL version
 print("Generating aux data for unsupervised GCN training w/ policy walks...")
-context_pairs, neg_nodes = gen_aux_train_data(policy_walks)
+context_pairs, neg_nodes = gen_aux_train_data_tensors(policy_walks)
 model_rl = GCN()
 optimizer_rl = torch.optim.Adam([
     dict(params=model_rl.conv1.parameters(), weight_decay=5e-4),
     dict(params=model_rl.conv2.parameters(), weight_decay=5e-4)
-], lr=0.01) 
+], lr=0.001) 
 
 print("Training GCN w/ policy walks...")
 GCN_train(epochs, model_rl, optimizer_rl, context_pairs, neg_nodes)
@@ -181,7 +224,7 @@ from sklearn.metrics import classification_report
 from sklearn.tree import DecisionTreeClassifier as DTree
 from sklearn.multiclass import OneVsRestClassifier as OVR
 from sklearn.linear_model import LogisticRegression as LR
-estimator = lambda : LR(n_jobs=16)
+estimator = lambda : LR(n_jobs=16, max_iter=1000)
 y_trans = lambda y : y.argmax(axis=1)
 model_rw.eval()
 model_rl.eval()
