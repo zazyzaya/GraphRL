@@ -8,9 +8,9 @@ from sklearn.metrics import classification_report, accuracy_score
 from sklearn.multiclass import OneVsRestClassifier as OVR
 from sklearn.linear_model import LogisticRegression as LR
 from torch_geometric.utils import degree
-from rl_module import Q_Walk_Simplified, RW_Encoder, train_loop, fast_train_loop
+from rl_module import Q_Walk_Example, RW_Encoder, train_loop, fast_train_loop
 
-class QW_Cora(Q_Walk_Simplified):
+class QW_Cora(Q_Walk_Example):
     def __init__(self, data, gamma=0.99, epsilon=lambda x: 0.5, episode_len=10,
                  num_walks=10, hidden=64, one_hot=False, network=None):
         super().__init__(data, gamma=gamma, epsilon=epsilon, episode_len=episode_len,
@@ -97,8 +97,8 @@ class Be_Quiet():
     def write(self, *args):
         pass
     
-
-test_cora()
+if __name__ == '__main__':
+    test_cora()
 
 import sys 
 def test_epsilon_cora():

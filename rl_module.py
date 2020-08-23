@@ -45,7 +45,7 @@ Generates random walks based on some user specified reward function
 class Q_Walker(ABC):
     def __init__(self, data, state_feats=None, action_feats=None,
                  gamma=0.99, epsilon=lambda x: 0.5, episode_len=10,
-                 num_walks=10, hidden=64, network=None, edata=None,
+                 num_walks=10, hidden=64, network=None, edata=False,
                  frozen=True):
         if state_feats == None:
             state_feats=data.num_nodes
@@ -71,22 +71,15 @@ class Q_Walker(ABC):
         
         self.data = data
         
-        self.episode_cnt = 1
+        self.episode_cnt = 0
         self.step = 0
         self.epsilon = epsilon
         self.gamma = gamma
         self.episode_len = episode_len
         self.num_walks = num_walks
         
-        if edata == None:
-            edata = torch.full(data.edge_index[0].size(), 1, dtype=torch.long)
-        
-        # CSR matrices make it easier to calculate neighbors
-        self.csr = csr_matrix((
-            edata,
-            (data.edge_index[0].numpy(), data.edge_index[1].numpy())), 
-            shape=(data.num_nodes, data.num_nodes)
-        )
+        self.edata = edata
+        self.csr = None
         
         # Dense adj matrices make concurrent episode generation possible
         # may not be worth the memory overhead?
@@ -96,12 +89,32 @@ class Q_Walker(ABC):
         # pseudo-tabular Q learning 
         self.Q_matrix = None
         
+    def _get_csr(self):
+        if self.csr == None:
+            if self.edata == False:
+                edata = torch.full(self.data.edge_index[0].size(), 1, dtype=torch.long)
+            else:
+                edata = self.data.edge_data
+        
+            # CSR matrices make it easier to calculate neighbors
+            self.csr = csr_matrix((
+                edata,
+                (self.data.edge_index[0].numpy(), self.data.edge_index[1].numpy())), 
+                shape=(self.data.num_nodes, self.data.num_nodes)
+            )
+            
+        return self.csr
+        
     def _get_dense_adj(self):
         if self.dense_adj == None:
             self.dense_adj = to_dense_adj(
                 self.data.edge_index, 
                 max_num_nodes=self.data.num_nodes
             )[-1].float()
+            
+            # Add self loops to prevent errors in rand walks
+            for i in range(self.data.num_nodes):
+                self.dense_adj[i,i] = 1
             
         return self.dense_adj
         
@@ -223,7 +236,7 @@ class Q_Walker(ABC):
     Chooses next action with optional e-greedy policy 
     '''
     def policy(self, s, nid, egreedy=True, return_value=False, weighted_rand=False):    
-        neighbors = self.csr[nid].indices
+        neighbors = self._get_csr()[nid].indices
         
         # Can't do anything about orphaned nodes
         if len(neighbors) == 0:
@@ -253,7 +266,7 @@ class Q_Walker(ABC):
     def _populate_q_table(self, batch, workers=16):
         # One unit of work for parallel exe
         def pqt_task(nid):
-            neighbors = torch.tensor(self.csr[nid].indices, dtype=torch.long)
+            neighbors = torch.tensor(self._get_csr()[nid].indices, dtype=torch.long, requires_grad=False)
             self.Q_matrix[nid][neighbors] = self.Q(
                 self.state_transition(nid),
                 self.encode_actions(neighbors)
@@ -268,8 +281,13 @@ class Q_Walker(ABC):
     
     def _get_q_table(self, batch, workers=16, hard_reset=False):
         if self.Q_matrix == None or hard_reset:
-            self.Q_matrix = torch.zeros((self.data.num_nodes, self.data.num_nodes))
-            self._populate_q_table(batch, workers=workers)
+            self.Q_matrix = torch.zeros(
+                (self.data.num_nodes, self.data.num_nodes),
+                requires_grad=False
+            )
+            
+            with torch.no_grad():
+                self._populate_q_table(batch, workers=workers)
             
         return self.Q_matrix  
     
@@ -283,8 +301,8 @@ class Q_Walker(ABC):
     the agent is on at time t, this is the more efficient way to generate
     walks for word2vec
     '''
-    def fast_walks(self, nids, egreedy=True, weighted_rand=False, silent=False, strings=True):
-        if egreedy or weighted_rand:
+    def fast_walks(self, nids, silent=False, strings=True, strategy='random'):
+        if strategy in ['egreedy', 'weighted']:
             Q = self._get_q_table(nids)
         if len(nids.size()) == 1:
             nids = nids.unsqueeze(dim=-1)
@@ -293,20 +311,21 @@ class Q_Walker(ABC):
         node = nids
         for _ in tqdm(range(self.num_walks), desc='Walks generated', disable=silent):
             walk = [nids]
-            for _ in range(self.episode_len):
-                if egreedy and random.random() < self.epsilon(None):
-                    node = Q[node.squeeze()].argmax(dim=1, keepdim=True)
-                elif weighted_rand:
-                    # Since all scores are relatively similar, make the 
-                    # difference more pronounced 
-                    prob_distro = Q[node.squeeze()]
-                    prob_distro = prob_distro - prob_distro[prob_distro > 0].min()
+            with torch.no_grad():
+                for _ in range(self.episode_len):
+                    if strategy=='egreedy' and random.random() < self.epsilon(None):
+                        node = Q[node.squeeze()].argmax(dim=1, keepdim=True)
+                    elif strategy=='weighted':
+                        # Since all scores are relatively similar, make the 
+                        # difference more pronounced 
+                        prob_distro = Q[node.squeeze()]
+                        prob_distro = prob_distro - prob_distro[prob_distro > 0].min()
+                        
+                        node = torch.multinomial(F.relu(prob_distro)+1e-10, num_samples=1)
+                    else:
+                        node = torch.multinomial(self._get_dense_adj()[node.squeeze()], num_samples=1)
                     
-                    node = torch.multinomial(F.relu(prob_distro)+1e-10, num_samples=1)
-                else:
-                    node = torch.multinomial(self._get_dense_adj()[node.squeeze()], num_samples=1)
-                
-                walk.append(node)
+                    walk.append(node)
             
             walk = torch.cat(walk, dim=1)
             if strings:
@@ -395,7 +414,7 @@ class Q_Walker(ABC):
             walk = [nid]
             
             for _ in range(self.episode_len-1):
-                neighbors = self.csr[walk[-1]].indices
+                neighbors = self._get_csr()[walk[-1]].indices
                 n = np.random.choice(neighbors)
                 
                 walk.append(n)
@@ -450,7 +469,7 @@ class Q_Walker(ABC):
             # Randomly sample an action. By using the adj matrix as the 
             # prob distro, we guarantee that a neighbor is always selected
             # without having to use the csr matrix which is ragged and not 
-            # good for matrix ops
+            # good for matrix ops    
             a = torch.multinomial(adj[nids], num_samples=1).squeeze()
             
             s_prime = self.state_transition(s,a=a)
@@ -507,38 +526,34 @@ class RW_Encoder():
     def __init__(self, walker):
         self.walker = walker 
     
-    def generate_walks_fast(self, batch=[], walk_type='weighted', silent=True, strings=False):
+    def generate_walks_fast(self, batch=[], strategy='weighted', 
+                            silent=True, strings=False, encode=False,
+                            w2v_params=dict()):
         if batch == []:
             batch = range(self.walker.data.num_nodes)
         
         if type(batch) != torch.Tensor:
             batch = torch.tensor(batch)
-        
-        if walk_type == 'random':
-            egreedy=False
-            weighted=False
-        
-        elif walk_type == 'weighted':
-            egreedy=False
-            weighted=True
-        
-        elif walk_type == 'egreedy':
-            egreedy=True
-            weighted=False
             
-        else:
-            raise ValueError(
-                'RW_Encoder.generate_walks_fast argument `walk_type` must be '
-                + '"weighted", "egreedy", or "random"\n\nRecieved "%s"' % walk_type)
+        print("Generating %s walks" % strategy)
         
-        print("Generating walks")
-        return self.walker.fast_walks(
-            batch,
-            egreedy=egreedy, 
-            weighted_rand=weighted,
-            silent=silent,
-            strings=strings
-        )
+        with torch.no_grad():
+            if not encode:
+                return self.walker.fast_walks(
+                    batch,
+                    strategy=strategy,
+                    silent=silent,
+                    strings=strings
+                )
+            
+            walks = self.walker.fast_walks(
+                    batch,
+                    strategy=strategy,
+                    silent=silent,
+                    strings=True
+            )
+        
+        return self.encode_nodes(batch=batch, walks=walks, w2v_params=w2v_params)
     
     def generate_walks(self, batch=[], workers=-1, random=False, 
                        egreedy=True, quiet=False, include_labels=False,
@@ -582,7 +597,7 @@ class RW_Encoder():
     
     def encode_nodes(self, batch=[], walks=None, random=False, w2v_params={}, weighted=False):
         # Make sure required params exist in w2v_params 
-        required = dict(size=64, sg=1, workers=16)
+        required = dict(size=128, sg=1, workers=16)
         for k,v in required.items():
             if k not in w2v_params:
                 w2v_params[k] = v    
@@ -594,8 +609,11 @@ class RW_Encoder():
         model = Word2Vec(walks, **w2v_params)
         
         idx_order = torch.tensor([int(i) for i in model.wv.index2entity], dtype=torch.long)
-        y = self.walker.data.y[idx_order].numpy()
-        X = model.wv.vectors
+        X = torch.zeros((idx_order.max()+1, w2v_params['size']), dtype=torch.float)
+        
+        # Put embeddings back in order
+        X[idx_order] = torch.tensor(model.wv.vectors)
+        y = self.walker.data.y[:batch.max(), :]        
         
         return X, y
     
@@ -664,7 +682,7 @@ class RW_Encoder():
             
     
 # Example 
-class Q_Walk_Simplified(Q_Walker):
+class Q_Walk_Example(Q_Walker):
     def __init__(self, data, gamma=0.99, epsilon=lambda x: 0.5, episode_len=10,
                  num_walks=10, hidden=64, one_hot=False, network=None, frozen=True):
         
@@ -699,36 +717,41 @@ class Q_Walk_Simplified(Q_Walker):
         
 import time 
 def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1, 
-                    early_stopping=0.05, epochs=800, nw=None, wl=None):
+                    early_stopping=0.05, epochs=800, nw=None, wl=None, 
+                    minibatch_bootstrap=False):
     non_orphans = (degree(Agent.data.edge_index[0], num_nodes=Agent.data.num_nodes) != 0).nonzero()
     non_orphans = non_orphans.T.numpy()[0]
     
     opt = torch.optim.Adam(Agent.parameters(), lr=1e-3, weight_decay=1e-4)
     for e in range(epochs):
         start = time.time()
-        if sample_size:    
+        if sample_size:  
+            np.random.shuffle(non_orphans)  
             b = np.array_split(non_orphans, non_orphans.shape[0]//sample_size)
         else:
             b = [non_orphans]
             
         steps = 0
         tot_loss = 0
+        opt.zero_grad()
         for batch in b:
             s,a,r = Agent.fast_episode_generation(batch=batch, nw=nw, wl=wl)
-            opt.zero_grad()
+            
             loss = F.mse_loss(Agent.Q(s,a), r)
             loss.backward()
             
             if clip:
                 torch.nn.utils.clip_grad_norm_(Agent.parameters(), clip)
             
-            if sample_size:
+            if sample_size and verbose > 1:
                 print("\t[%d-%d]: %0.5f" % (e,steps,loss.item()))
             
-            opt.step()
+            
             tot_loss += loss.item()
             steps += 1
     
+        opt.step()
+        
         if sample_size:
             tot_loss = tot_loss/steps
         
@@ -737,6 +760,9 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
         if tot_loss <= early_stopping:
             print("Early stopping")
             break
+        
+        if minibatch_bootstrap and sample_size:
+            sample_size = int(sample_size * 1.5) if sample_size < non_orphans.shape[0] // 1.5 else None
         
     s,a,r = Agent.fast_episode_generation(batch=batch, nw=1)
     print(Agent.Q(s,a)[:10])
@@ -860,7 +886,7 @@ def example(sample_size=50, clip=None, reparam=40,
     data = lg.load_cora()
     
     # Set up a basic agent 
-    Agent = Q_Walk_Simplified(data, episode_len=wl, num_walks=nw, 
+    Agent = Q_Walk_Example(data, episode_len=wl, num_walks=nw, 
                            epsilon=lambda x : 0.95, gamma=0.999,
                            hidden=1000, one_hot=True, frozen=False)
 

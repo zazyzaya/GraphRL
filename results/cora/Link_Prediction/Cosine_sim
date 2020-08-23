@@ -1,0 +1,7 @@
+WL 40
+NW 10
+Window Size 10
+Dim 128
+Eps 0.75
+Gamma 0.75
+Undirected training edges

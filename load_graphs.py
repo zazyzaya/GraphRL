@@ -7,6 +7,7 @@ from torch_geometric.data import Data
 DATA = '/mnt/raid0_24TB/datasets/'
 CORA = DATA + 'cora/'
 BLOG = DATA + 'n2v_benchmarks/BlogCatalog-dataset/'
+CITE = DATA + 'citeseer/'
 
 def load_cora():
     edges = pd.read_csv(CORA + 'cora_cites.csv')
@@ -22,8 +23,8 @@ def load_cora():
     
     # Undirected since there are so many orphans otherwise
     ei = torch.tensor([
-        citing + cited,
-        cited + citing
+        citing,# + cited,
+        cited,# + citing
     ])
     
     # Don't need paper id's or class in node attr vectors
@@ -72,4 +73,71 @@ def load_blog():
         edge_index=ei,
         y=y,
         num_nodes=num_nodes
+    )
+    
+def load_citeseer():
+    # The features file consists of a 1-hot vector 
+    # mapped to each node, and the last col is the 
+    # class (as a string)
+    feats = pd.read_csv(
+        CITE + 'citeseer.content',
+        delimiter='\t',
+        header=None
+    )
+    
+    # Only care about nodes with features; all others don't even bother
+    # including edges to nodes that have no features, we can't learn from them
+    node_map = dict((feats.iloc[i, 0], i) for i in range(len(feats.index)))
+    
+    # Slice out col 0 (node id), and col -1 (class label)
+    x = torch.tensor(
+        feats.iloc[:, 1:-1].to_numpy(),
+        dtype=torch.float
+    )
+    
+    # Convert strings to one-hot vectors
+    y_str = feats.iloc[:, -1].to_list()
+    unique_labels = list(set(y_str))
+    y_map = { unique_labels[i]:i for i in range(len(unique_labels)) }
+    
+    # Build one-hot encoding
+    y = torch.zeros((len(y_str), len(y_map)))
+    for i,ys in enumerate(y_str):
+        y[i][y_map[ys]] = 1
+    
+    # Map each node string to a unique int
+    edges = pd.read_csv(
+        CITE + 'citeseer.cites', 
+        names=['src', 'dst'],
+        delimiter='\t'
+    )
+    
+    src = edges['src'].to_list()
+    dst = edges['dst'].to_list()
+    
+    src_filtered = []
+    dst_filtered = []
+    
+    # Remove edges that connect to nodes without features
+    for i in range(len(src)):
+        if src[i] in node_map and dst[i] in node_map:
+            src_filtered.append(src[i])
+            dst_filtered.append(dst[i])
+    
+    # Free up memory, because I'm just that fancy  
+    del src
+    del dst 
+            
+    ei = torch.tensor(
+        [
+            [node_map[s] for s in src_filtered],
+            [node_map[d] for d in dst_filtered]
+        ],
+        dtype=torch.long
+    )
+    
+    return Data(
+        edge_index=ei,
+        x=x,
+        y=y
     )
