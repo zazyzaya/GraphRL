@@ -15,21 +15,6 @@ class QW_Cora(Q_Walk_Simplified):
                          num_walks=num_walks, hidden=hidden, one_hot=one_hot, network=network)
 
         self.cs = torch.nn.CosineSimilarity()
-    
-    def remove_direction(self):
-        self.data.edge_index = torch.cat(
-            [
-                self.data.edge_index, 
-                self.data.edge_index[torch.tensor([1,0]), :]
-            ], dim=1)
-        
-        pass
-        
-    def repair_edge_index(self):
-        self.data.edge_index = self.data.edge_index[
-            :, 
-            :self.data.edge_index.size()[1]//2
-        ]
         
     def reward(self, s,a,s_prime,nid):
         return self.max_sim_reward(s,a,s_prime,nid)
@@ -45,13 +30,44 @@ class QW_Cora(Q_Walk_Simplified):
         
         return sim 
     
+    '''
+    Calculates Sørenson Index:
+
+        | N(u) && N(v) |
+        ----------------
+        |N(u)|  + |N(v)|
+    
+    Useful for well-clustered graphs and balances
+    for outliers 
+    '''
+    def sorenson_reward(self, s, a, s_prime, nid):
+        src = self.action_map[nid]
+        dst = self.action_map[a]
+        
+        # So two non-edges don't count as a shared edge
+        dst[dst == -1] = -2
+        
+        # Kind of (painfully) slow, but I can't find a torch op that 
+        # does this
+        return torch.tensor(
+            [[
+                np.intersect1d(src[i,:],dst[i,:]).shape[0] 
+                for i in range(src.size()[0])
+            ]],
+            dtype=torch.float 
+        ).T.true_divide(
+            (src >= 0).sum(axis=1, keepdim=True) + 
+            (dst >= 0).sum(axis=1, keepdim=True)
+        )
+        
+        
 
 from sklearn.decomposition import PCA
 def preprocess(X):
-    decomp = PCA(n_components=32, random_state=1337)
+    decomp = PCA(n_components=128, random_state=1337)
     return torch.tensor(decomp.fit_transform(X.numpy()))    
 
-def set_up_cora(wl=40, nw=10, epsilon=0.5, gamma=0.8, 
+def set_up_cora(wl=5, nw=40, epsilon=0.6, gamma=0.99, 
                 early_stopping=0.01, epochs=50):
     data = lg.load_cora()
     
@@ -79,15 +95,28 @@ def set_up_cora(wl=40, nw=10, epsilon=0.5, gamma=0.8,
     Agent.update_action_map()
     
     Encoder = RW_Encoder(Agent)
-    non_orphans = fast_train_loop(
-        Agent,
+    
+    kwargs = dict(
         verbose=1,
         early_stopping=early_stopping,
         nw=min(nw, 5),
         wl=min(wl, 20),
-        epochs=epochs,
+        epochs=epochs//2,
         sample_size=None,
         minibatch_bootstrap=False
+    )
+    
+    print("Training on random walks")
+    non_orphans = fast_train_loop(
+        Agent,
+        **kwargs
+    )
+    
+    print("Training on weighted walks")
+    fast_train_loop(
+        Agent,
+        strategy='weighted',
+        **kwargs
     )
     
     data.edge_index = all_edges
@@ -118,39 +147,52 @@ def set_up_citeseer(wl=10, nw=10, epsilon=0.5, gamma=0.99, early_stopping=0.03,
     Agent.data.edge_index = data.edge_index[:, data.train_mask.repeat(2)]
     Agent.update_action_map()
     
-    Encoder = RW_Encoder(Agent)
-    non_orphans = fast_train_loop(
-        Agent,
+    kwargs = dict(
         verbose=1,
         early_stopping=early_stopping,
         nw=min(nw, 5),
-        wl=min(wl, 10),
-        epochs=epochs,
-        sample_size=128,
+        wl=min(wl, 20),
+        epochs=epochs//2,
+        sample_size=None,
         minibatch_bootstrap=False
+    )
+    
+    Encoder = RW_Encoder(Agent)
+    print("Training on random walks")
+    non_orphans = fast_train_loop(
+        Agent,
+        **kwargs
+    )
+    
+    print("Training on weighted walks")
+    fast_train_loop(
+        Agent,
+        strategy='weighted',
+        **kwargs
     )
     
     data.edge_index = all_edges
     return Agent, Encoder, non_orphans
 
-def test_agent(trials=1, set_up_fn=set_up_cora):
+def test_agent(trials=1, set_up_fn=set_up_cora, include_random=False):
     Agent, Encoder, non_orphans = set_up_fn()
     
-    w2v = {'window': 10, 'size': 128}
+    w2v = {'window': 10, 'size': 128, 'iter':5}
     
     rw = []
     pww = []
     pgw = []
     
     for _ in range(trials):
-        rw.append(Encoder.generate_walks_fast(
-            batch=non_orphans, 
-            strategy='random', 
-            encode=True, 
-            w2v_params=w2v,
-            silent=False
-        )[0])
-        
+        if include_random:
+            rw.append(Encoder.generate_walks_fast(
+                batch=non_orphans, 
+                strategy='random', 
+                encode=True, 
+                w2v_params=w2v,
+                silent=False
+            )[0])
+            
         pww.append(Encoder.generate_walks_fast(
             batch=non_orphans, 
             strategy='weighted', 
@@ -174,7 +216,7 @@ def test_agent(trials=1, set_up_fn=set_up_cora):
     neg = generate_negative_samples(data, data.test_mask.size()[0])
     pos = data.edge_index[:, data.test_mask].T
     
-    # Quickly find standard error as did 
+    # Quickly find standard error as did original paper
     stderr = lambda x : x.std()/(trials ** 0.5)
     
     print()
@@ -185,19 +227,26 @@ def test_agent(trials=1, set_up_fn=set_up_cora):
         # Remove spaces lazilly added for formatting
         bop = bop.strip()
         
-        rw_score = np.array([evaluate(w, pos, neg, bin_op=bop) for w in rw])
-        print("\tRandom walks:\t%0.4f (+/-) %0.03f" % (rw_score.mean(), stderr(rw_score)))
-        
+        if include_random:
+            rw_score = np.array([evaluate(w, pos, neg, bin_op=bop) for w in rw])
+            print("\tRandom walks:\t%0.4f (+/-) %0.03f" % (rw_score.mean(), stderr(rw_score)))
+            
         pww_score = np.array([evaluate(w, pos, neg, bin_op=bop) for w in pww])
         print("\tPolicy walks:\t%0.4f (+/-) %0.03f" % (pww_score.mean(), stderr(pww_score)))
         
         pgw_score = np.array([evaluate(w, pos, neg, bin_op=bop) for w in pgw])
         print("\tE-greedy walks:\t%0.4f (+/-) %0.03f" % (pgw_score.mean(), stderr(pgw_score)))
+        
+        print()
+        if include_random:
+            print(rw_score)
+        print(pww_score)
+        print(pgw_score)
     
 
-test_agent(trials=5)    
+#test_agent(trials=5, include_random=True)    
 
-def test_epsilon(wl=40, nw=10, gamma=0.75, early_stopping=0.05):
+def test_epsilon(wl=40, nw=10, gamma=0.99, early_stopping=0.05, trials=5):
     Agent, Encoder, non_orphans = set_up_cora(
         wl=wl, nw=nw, gamma=gamma, early_stopping=early_stopping
     )
@@ -215,19 +264,24 @@ def test_epsilon(wl=40, nw=10, gamma=0.75, early_stopping=0.05):
     for eps in range(0, 105, 5):
         sys.stdout = Be_Quiet()
         
+        walks = []
         eps = eps / 100 
         Agent.epsilon = lambda x : eps
-        walks, _ = Encoder.generate_walks_fast(
-            batch=non_orphans, 
-            strategy='egreedy',
-            encode=True,
-            silent=True
-        )
+        
+        for _ in range(trials):
+            walks.append(Encoder.generate_walks_fast(
+                batch=non_orphans, 
+                strategy='egreedy',
+                encode=True,
+                silent=True
+            )[0])
+        
+        stderr = lambda x : x.std()/(trials ** 0.5)
         
         sys.stdout = og 
         print("-"*10 + ' Epsilon: %0.2f ' % eps + "-"*10)
         for op in ['hadamard', 'l1\t', 'l2\t']:
-            score = evaluate(walks, pos, neg, bin_op=op.strip())
-            print(op + ": %0.4f" % score) 
+            score = np.array([evaluate(walk, pos, neg, bin_op=op.strip()) for walk in walks])
+            print(op + ": %0.4f (+/-) %0.3f" % (score.mean(), stderr(score))) 
 
-#test_epsilon()
+test_epsilon()

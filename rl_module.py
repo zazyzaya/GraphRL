@@ -613,7 +613,12 @@ class RW_Encoder():
         
         # Put embeddings back in order
         X[idx_order] = torch.tensor(model.wv.vectors)
-        y = self.walker.data.y[:batch.max(), :]        
+        y = self.walker.data.y[:batch.max(), :]     
+        
+        # It seems like training more models improves later models'
+        # accuracy? Putting this in to absolutely make sure runs
+        # are indipendant
+        del model    
         
         return X, y
     
@@ -718,7 +723,7 @@ class Q_Walk_Example(Q_Walker):
 import time 
 def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1, 
                     early_stopping=0.05, epochs=800, nw=None, wl=None, 
-                    minibatch_bootstrap=False):
+                    minibatch_bootstrap=False, strategy=None):
     non_orphans = (degree(Agent.data.edge_index[0], num_nodes=Agent.data.num_nodes) != 0).nonzero()
     non_orphans = non_orphans.T.numpy()[0]
     
@@ -735,8 +740,12 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
         tot_loss = 0
         opt.zero_grad()
         for batch in b:
-            s,a,r = Agent.fast_episode_generation(batch=batch, nw=nw, wl=wl)
-            
+            if strategy:
+                s,a,r = Agent.fast_episode_generation(batch=batch, nw=nw, wl=wl, strategy=strategy)
+            # Allow backwards compatability w RL_Walker 
+            else:
+                s,a,r = Agent.fast_episode_generation(batch=batch, nw=nw, wl=wl)
+                
             loss = F.mse_loss(Agent.Q(s,a), r)
             loss.backward()
             

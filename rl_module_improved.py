@@ -258,3 +258,18 @@ class Q_Walk_Simplified(Q_Walker_Improved):
             return self.encode_actions_node_feats(actions)
         else:
             return super().encode_actions(actions)
+        
+    def remove_direction(self):
+        self.data.edge_index = torch.cat(
+            [
+                self.data.edge_index, 
+                self.data.edge_index[torch.tensor([1,0]), :]
+            ], dim=1)
+        
+        pass
+        
+    def repair_edge_index(self):
+        self.data.edge_index = self.data.edge_index[
+            :, 
+            :self.data.edge_index.size()[1]//2
+        ]

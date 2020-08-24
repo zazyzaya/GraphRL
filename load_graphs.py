@@ -2,6 +2,7 @@ import torch
 import pandas as pd 
 
 from torch_geometric.data import Data 
+from torch_geometric.utils import add_remaining_self_loops
 
 # File locations
 DATA = '/mnt/raid0_24TB/datasets/'
@@ -26,6 +27,8 @@ def load_cora():
         citing,# + cited,
         cited,# + citing
     ])
+    
+    ei = add_remaining_self_loops(ei)[0]
     
     # Don't need paper id's or class in node attr vectors
     X = torch.tensor(
@@ -61,6 +64,7 @@ def load_blog():
     ei = torch.tensor([ src + dst, 
                         dst + src], dtype=torch.long)
     ei = ei - 1
+    ei = add_remaining_self_loops(ei)[0]
     
     # Takes max nid from src and dst, then uses max of those two 
     num_nodes = edges.max().max()
