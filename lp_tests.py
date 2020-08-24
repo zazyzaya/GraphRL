@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import load_graphs as lg 
 
+from gcn_experiments import get_gcn_embeddings
 from tests import Be_Quiet
 from rl_module_improved import Q_Walk_Simplified
 from rl_module import RW_Encoder, fast_train_loop

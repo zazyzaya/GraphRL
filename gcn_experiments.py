@@ -20,13 +20,14 @@ from rl_module_improved import Q_Walk_Simplified
 
 # Simple GCN class which generates 16-dim node embedding
 class GCN(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, data):
         super(GCN, self).__init__()
+        self.data = data 
         self.conv1 = GCNConv(data.x.size()[1], 128)
         self.conv2 = GCNConv(128,64)
 
     def forward(self):
-        x, edge_index, edge_weight = data.x, data.edge_index, data.weights
+        x, edge_index = self.data.x, self.data.edge_index
         x = F.relu(self.conv1(x, edge_index))
         x = F.dropout(x, training=self.training)
         x = self.conv2(x, edge_index)
@@ -85,7 +86,7 @@ def gen_aux_train_data_tensors(walks):
     print("Generating neg samples")
     num_neg_samples = 5
     neg_samples = torch.tensor(
-        np.random.choice(non_orphans, size=(context_pairs.size()[0]*num_neg_samples,2))
+        np.random.choice(walks.flatten().unique().numpy(), size=(context_pairs.size()[0]*num_neg_samples,2))
     )
     
     print("Removing false-neg samples")
@@ -149,7 +150,8 @@ def preprocess(X):
     decomp = PCA(n_components=256, random_state=1337)
     return torch.tensor(decomp.fit_transform(X.numpy()))
 
-def train_RL_walker(data, gamma=0.99,eps=0.75,nw=10,wl=5,early_stopping=0.03):
+def train_RL_walker(data, gamma=0.99,eps=0.75,nw=10,wl=5,
+                    early_stopping=0.03,epochs=50):
     # Preprocessing data
     print("Preprocessing data")
     data.x = preprocess(data.x)
@@ -169,7 +171,7 @@ def train_RL_walker(data, gamma=0.99,eps=0.75,nw=10,wl=5,early_stopping=0.03):
         verbose=1,
         early_stopping=early_stopping,
         nw=nw,
-        epochs=25
+        epochs=epochs//2
     )
     
     fast_train_loop(
@@ -177,63 +179,40 @@ def train_RL_walker(data, gamma=0.99,eps=0.75,nw=10,wl=5,early_stopping=0.03):
         verbose=1,
         early_stopping=early_stopping,
         nw=nw,
-        epochs=25,
+        epochs=epochs//2,
         strategy='weighted'
     )
 
     return Encoder, non_orphans
 
-def get_embeddings(data, epochs=50):
-    # Set up a basic agent 
-    print("Training RL walker...")
-    Encoder, non_orphans = train_RL_walker(data, nw=10,wl=5)
-
+def get_walks(Encoder, non_orphans, nw=10, wl=5, strategy='random'):
     # Generate some policy walks and random walks for comparison:
-    print("Generating policy-based walks...")
-    policy_walks = Encoder.generate_walks_fast(
+    print("Generating %s walks..." % strategy)
+    return Encoder.generate_walks_fast(
         batch=non_orphans, 
         strings=False, 
-        strategy='weighted'
-    )
-    print("Generating random walks...")
-    random_walks = Encoder.generate_walks_fast(
-        batch=non_orphans, 
-        strategy='random', 
-        strings=False
+        strategy=strategy
     )
 
-    # lets start with the random walks
-    print("Generating aux data for unsupervised GCN training w/ random walks...")
-    context_pairs, neg_nodes = gen_aux_train_data_tensors(random_walks)
+def get_gcn_embeddings(data, walks, text='random', epochs=50):
+    print("Generating aux data for unsupervised GCN training w/ %s walks..." % text)
+    context_pairs, neg_nodes = gen_aux_train_data_tensors(walks)
+    
     # Build the model
-    model_rw = GCN()
-    optimizer_rw = torch.optim.Adam([
-        dict(params=model_rw.conv1.parameters(), weight_decay=5e-4),
-        dict(params=model_rw.conv2.parameters(), weight_decay=5e-4)
-    ], lr=0.001)  # Only perform weight-decay on first convolution.
-
-    # Train it
-    print("Training GCN w/ random walks...")
-    GCN_train(epochs, model_rw, optimizer_rw, context_pairs, neg_nodes)
-
-    # Now the RL version
-    print("Generating aux data for unsupervised GCN training w/ policy walks...")
-    context_pairs, neg_nodes = gen_aux_train_data_tensors(policy_walks)
-    model_rl = GCN()
-    optimizer_rl = torch.optim.Adam([
-        dict(params=model_rl.conv1.parameters(), weight_decay=5e-4),
-        dict(params=model_rl.conv2.parameters(), weight_decay=5e-4)
+    model = GCN(data)
+    optimizer = torch.optim.Adam([
+        dict(params=model.conv1.parameters(), weight_decay=5e-4),
+        dict(params=model.conv2.parameters(), weight_decay=5e-4)
     ], lr=0.001) 
 
-    print("Training GCN w/ policy walks...")
-    GCN_train(epochs, model_rl, optimizer_rl, context_pairs, neg_nodes)
-
-    model_rw.eval()
-    model_rl.eval()
-    embeds_rw = model_rw.forward().detach().numpy()
-    embeds_rl = model_rl.forward().detach().numpy()
+    # Train it
+    print("Training GCN w/ %s walks..." % text)
+    GCN_train(epochs, model, optimizer, context_pairs, neg_nodes)
     
-    return embeds_rw, embeds_rl
+    model.eval()
+    embeds = model.forward().detach().numpy()
+    
+    return embeds
 
 # And now we can evaluate
 # Now want to use embeddings to predict label
@@ -242,7 +221,7 @@ from sklearn.metrics import classification_report
 from sklearn.tree import DecisionTreeClassifier as DTree
 from sklearn.multiclass import OneVsRestClassifier as OVR
 from sklearn.linear_model import LogisticRegression as LR
-def test_node_classifcation(embeds, walk_type, data):
+def test_node_classification(embeds, walk_type, data):
     estimator = lambda : LR(n_jobs=16, max_iter=1000)
     y_trans = lambda y : y.argmax(axis=1)
 
@@ -253,67 +232,31 @@ def test_node_classifcation(embeds, walk_type, data):
     yprime = lr.predict(Xte)
     print("GCN with %s result:" % walk_type)
     print(classification_report(yprime, yte))
+    
 
-from link_prediction import partition_data
-def test_link_prediction_setup_RL(data, wl=5, nw=40, epsilon=0.6, 
-                                  gamma=0.99, early_stopping=0.01, 
-                                  epochs=50):
-    print("Splitting edges into train and test sets")
-    partition_data(data, percent_hidden=0.10)
-    
-    print("Running PCA on node features")
-    data.x = preprocess(data.x)
-    
-    # Set up a basic agent 
-    Agent = QW_Cora(data, episode_len=wl, num_walks=nw, 
-                           epsilon=lambda x : epsilon, gamma=gamma,
-                           hidden=1028, one_hot=True)
-    
-    # New experiment: train on bidirectional graph
-    Agent.remove_direction()
-    all_edges = Agent.data.edge_index
-    
-    # Note by repeating train_mask, agent still won't learn about (u,v)
-    # if (v,u) is masked. The edges it learns on are the same, they are 
-    # just allowed to be bidirectional for random walks
-    Agent.data.edge_index = data.edge_index[:, data.train_mask.repeat(2)]
-    
-    # Make sure edges are hidden when querying for neighbors
-    Agent.update_action_map()
-    
-    Encoder = RW_Encoder(Agent)
-    
-    kwargs = dict(
-        verbose=1,
-        early_stopping=early_stopping,
-        nw=min(nw, 5),
-        wl=min(wl, 20),
-        epochs=epochs//2,
-        sample_size=None,
-        minibatch_bootstrap=False
-    )
-    
-    print("Training on random walks")
-    non_orphans = fast_train_loop(
-        Agent,
-        **kwargs
-    )
-    
-    print("Training on weighted walks")
-    fast_train_loop(
-        Agent,
-        strategy='weighted',
-        **kwargs
-    )
-    
-    data.edge_index = all_edges
-    return Agent, Encoder, non_orphans
-
-if __name__ == '__main__':
+def node_class_cora():
     # Load data
     print("Loading cora data...")
     data = lg.load_cora()
     
-    rw, rl = get_embeddings(data)
-    test_node_classifcation(rw, 'Random Walk', data)
-    test_node_classifcation(rl, 'Policy Guided', data)
+    # Set up a basic agent 
+    print("Training RL walker...")
+    Encoder, non_orphans = train_RL_walker(data,epochs=25)
+    
+    rw = get_gcn_embeddings(
+        data, 
+        get_walks(Encoder, non_orphans, strategy='random'),
+        epochs=25
+    )
+    rl = get_gcn_embeddings(
+        data, 
+        get_walks(Encoder, non_orphans, strategy='weighted'),
+        text='weighted',
+        epochs=25
+    )
+    
+    test_node_classification(rw, 'Random Walk', data)
+    test_node_classification(rl, 'Policy Guided', data)
+    
+if __name__ == '__main__':
+    node_class_cora()
