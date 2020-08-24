@@ -19,47 +19,6 @@ class QW_Cora(Q_Walk_Simplified):
         
     def reward(self, s,a,s_prime,nid):
         return self.max_sim_reward(s,a,s_prime,nid)
-    
-    def min_sim_reward(self, s,a,s_prime,nid):
-        return 1-self.cs(self.data.x[nid], self.data.x[a]).unsqueeze(-1)    
-    
-    def max_sim_reward(self, s,a,s_prime,nid):
-        sim = self.cs(self.data.x[nid],self.data.x[a]).unsqueeze(-1)
-        
-        # Punish returning walking toward "yourself"
-        sim[sim==1] = 0
-        
-        return sim 
-    
-    '''
-    Calculates Sørenson Index:
-
-        | N(u) && N(v) |
-        ----------------
-        |N(u)|  + |N(v)|
-    
-    Useful for well-clustered graphs and balances
-    for outliers 
-    '''
-    def sorenson_reward(self, s, a, s_prime, nid):
-        src = self.action_map[nid]
-        dst = self.action_map[a]
-        
-        # So two non-edges don't count as a shared edge
-        dst[dst == -1] = -2
-        
-        # Kind of (painfully) slow, but I can't find a torch op that 
-        # does this
-        return torch.tensor(
-            [[
-                np.intersect1d(src[i,:],dst[i,:]).shape[0] 
-                for i in range(src.size()[0])
-            ]],
-            dtype=torch.float 
-        ).T.true_divide(
-            (src >= 0).sum(axis=1, keepdim=True) + 
-            (dst >= 0).sum(axis=1, keepdim=True)
-        )
         
         
 
@@ -68,7 +27,7 @@ def preprocess(X):
     decomp = PCA(n_components=128, random_state=1337)
     return torch.tensor(decomp.fit_transform(X.numpy()))    
 
-def set_up_cora(wl=5, nw=40, epsilon=0.6, gamma=0.99, 
+def set_up_cora(wl=5, nw=40, epsilon=0.25, gamma=0.99, 
                 early_stopping=0.01, epochs=50):
     data = lg.load_cora()
     
@@ -175,7 +134,106 @@ def set_up_citeseer(wl=10, nw=10, epsilon=0.5, gamma=0.99, early_stopping=0.03,
     data.edge_index = all_edges
     return Agent, Encoder, non_orphans
 
-def test_agent(trials=1, set_up_fn=set_up_cora, include_random=False):
+def test_gcn_agent(trials=1, set_up_fn=set_up_cora, include_random=False):
+    
+    Agent, Encoder, non_orphans = set_up_fn(wl=10, nw=20, epsilon=0.75, epochs=50)
+    
+    rw = []
+    pww = []
+    pgw = []
+    
+    max_samples=2**12
+    epochs=25
+    
+    # Remask the edges before giving it to GCN
+    all_edges = Agent.data.edge_index
+    Agent.data.edge_index = Agent.data.edge_index[:, Agent.data.train_mask.repeat(2)]
+    
+    for _ in range(trials):
+        if include_random:
+            rw.append(
+                get_gcn_embeddings(
+                    Agent.data,
+                    Encoder.generate_walks_fast(
+                        batch=non_orphans, 
+                        strategy='random', 
+                        encode=False,
+                        strings=False,
+                        silent=False
+                    ),
+                    text='random',
+                    as_numpy=False,
+                    max_samples=max_samples,
+                    epochs=epochs
+                )
+            )
+            
+        pww.append(
+            get_gcn_embeddings(
+                Agent.data,
+                Encoder.generate_walks_fast(
+                    batch=non_orphans, 
+                    strategy='weighted', 
+                    encode=False,
+                    strings=False,
+                    silent=False
+                ),
+                text='weighted',
+                as_numpy=False,
+                max_samples=max_samples,
+                epochs=epochs
+            )
+        )
+        pgw.append(
+            get_gcn_embeddings(
+                Agent.data,
+                Encoder.generate_walks_fast(
+                    batch=non_orphans, 
+                    strategy='egreedy', 
+                    encode=False,
+                    strings=False,
+                    silent=False
+                ),
+                text='e-greedy',
+                as_numpy=False,
+                max_samples=max_samples,
+                epochs=epochs
+            )
+        )
+    
+    # Make edges directed again
+    Agent.data.edge_index = all_edges
+    Agent.repair_edge_index()
+    data = Agent.data
+    
+    print("Generating negative samples")
+    neg = generate_negative_samples(data, data.test_mask.size()[0])
+    pos = data.edge_index[:, data.test_mask].T
+    
+    # Quickly find standard error as did original paper
+    stderr = lambda x : x.std()/(trials ** 0.5)
+    
+    print()
+    print("Running link prediction (avg of %d indipendant runs)" % trials)
+    for bop in ['hadamard', '   l1   ', '   l2   ']:#, '   avg  ']:
+        print("-"* 10 + ' ' + bop + ' ' + '-'*10)
+        
+        # Remove spaces lazilly added for formatting
+        bop = bop.strip()
+        
+        if include_random:
+            rw_score = np.array([evaluate(w, pos, neg, bin_op=bop) for w in rw])
+            print("\tRandom walks:\t%0.4f (+/-) %0.03f" % (rw_score.mean(), stderr(rw_score)))
+            
+        pww_score = np.array([evaluate(w, pos, neg, bin_op=bop) for w in pww])
+        print("\tPolicy walks:\t%0.4f (+/-) %0.03f" % (pww_score.mean(), stderr(pww_score)))
+        
+        pgw_score = np.array([evaluate(w, pos, neg, bin_op=bop) for w in pgw])
+        print("\tE-greedy walks:\t%0.4f (+/-) %0.03f" % (pgw_score.mean(), stderr(pgw_score)))
+
+test_gcn_agent(trials=1, include_random=True)    
+
+def test_link_pred(trials=1, set_up_fn=set_up_cora, include_random=False):
     Agent, Encoder, non_orphans = set_up_fn()
     
     w2v = {'window': 10, 'size': 128, 'iter':5}
@@ -243,9 +301,6 @@ def test_agent(trials=1, set_up_fn=set_up_cora, include_random=False):
             print(rw_score)
         print(pww_score)
         print(pgw_score)
-    
-
-#test_agent(trials=5, include_random=True)    
 
 def test_epsilon(wl=40, nw=10, gamma=0.99, early_stopping=0.05, trials=5):
     Agent, Encoder, non_orphans = set_up_cora(
@@ -285,4 +340,4 @@ def test_epsilon(wl=40, nw=10, gamma=0.99, early_stopping=0.05, trials=5):
             score = np.array([evaluate(walk, pos, neg, bin_op=op.strip()) for walk in walks])
             print(op + ": %0.4f (+/-) %0.3f" % (score.mean(), stderr(score))) 
 
-test_epsilon()
+#test_epsilon()

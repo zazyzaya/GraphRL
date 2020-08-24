@@ -20,11 +20,11 @@ from rl_module_improved import Q_Walk_Simplified
 
 # Simple GCN class which generates 16-dim node embedding
 class GCN(torch.nn.Module):
-    def __init__(self, data):
+    def __init__(self, data, hidden=128, out=64):
         super(GCN, self).__init__()
         self.data = data 
-        self.conv1 = GCNConv(data.x.size()[1], 128)
-        self.conv2 = GCNConv(128,64)
+        self.conv1 = GCNConv(data.x.size()[1], hidden)
+        self.conv2 = GCNConv(hidden, out)
 
     def forward(self):
         x, edge_index = self.data.x, self.data.edge_index
@@ -66,14 +66,16 @@ def gen_aux_train_data(walks):
     neg_nodes = np.array(neg_nodes)
     return context_pairs, neg_nodes
 
-def gen_aux_train_data_tensors(walks):
+def gen_aux_train_data_tensors(walks, window=5):
     print("Generating pos samples")
     context_pairs = []
-    for i in range(walks.size()[1]):
-        for j in range(walks.size()[1]):
+     
+    for i in tqdm(range(walks.size()[1])):
+        for j in range(max(0, i-window), min(walks.size()[1], i+window)):
             if i == j:
                 continue
             context_pairs.append(walks[:, torch.tensor([i,j])])
+        
     
     context_pairs = torch.cat(context_pairs, dim=0)
     
@@ -81,33 +83,58 @@ def gen_aux_train_data_tensors(walks):
     # aren't present. Convert from tuple to unique int and store as a set
     exp = torch.tensor([walks.max().item(), 1])
     encode = lambda x : (x*exp).sum(axis=1)
-    encoded_pairs = set([encode.item() for encode in (context_pairs*exp).sum(axis=1)])
+    enc_pairs = torch.tensor(list(set(encode.item() for encode in (context_pairs*exp).sum(axis=1))))
     
     print("Generating neg samples")
     num_neg_samples = 5
     neg_samples = torch.tensor(
-        np.random.choice(walks.flatten().unique().numpy(), size=(context_pairs.size()[0]*num_neg_samples,2))
+        np.random.choice(walks.flatten().unique().numpy(), size=(walks.max().item()+1,num_neg_samples))
     )
     
-    print("Removing false-neg samples")
-    non_dupes = []
-    for enc in tqdm(encode(neg_samples)):
-        non_dupes.append(enc.item() not in encoded_pairs)
+    print("Filtering out false negatives")
+    give_up=5
+    for col in tqdm(range(neg_samples.size()[1])):
+        tries = 0
+        enc = torch.stack(
+            (
+                torch.arange(0,walks.max().item()+1,dtype=torch.long), 
+                neg_samples[:, col]
+            ), 
+            dim=1
+        )
         
-    neg_samples = neg_samples[non_dupes, :]
-    
-    print("Sampling the correct num of neg samples")
-    neg_samples = neg_samples[:context_pairs.size()[0], :]
-    
+        enc = encode(enc)
+        while tries < give_up:
+            # Returns all indices that have elements contained in enc_pairs
+            dupes = enc.view(1,-1).eq(enc_pairs.view(-1,1)).sum(0).bool()
+            num_dupes = dupes.sum().item()
+            
+            if num_dupes == 0:
+                break 
+            
+            # Replace all duplicates with random vals
+            neg_samples[dupes, col] = torch.tensor(
+                np.random.choice(walks.flatten().unique().numpy(), size=num_dupes)
+            )
+            tries += 1
+        
+    # Then sample all indices used by pos samples in order
+    neg_samples = neg_samples[context_pairs[:,0]]
     return context_pairs.numpy(), neg_samples.numpy()
 
 # Skip-gram like Unsupervised loss based on similarity of context pairs and dissimilarity of neg samples
-def GCN_unsup_loss(embeds, context_pairs, neg_samples):
+def GCN_unsup_loss(embeds, context_pairs, neg_samples, max_samples=None):
     input_embeds = embeds[context_pairs[:,0]]
     context_embeds = embeds[context_pairs[:,1]]
-
-    # neg embeds is avg of all neg samps
     neg_embeds = embeds[neg_samples]
+
+    if max_samples:
+        rnd = torch.randperm(neg_embeds.size()[0])[:max_samples]
+        input_embeds = input_embeds[rnd, :]
+        context_embeds = context_embeds[rnd, :]
+        neg_embeds = neg_embeds[rnd, :]
+        
+    # neg embeds is avg of all neg samps
     num_neg_samples = neg_embeds.size()[1]
     neg_embeds_avg = torch.true_divide(neg_embeds.sum(axis=1),num_neg_samples)
 
@@ -121,13 +148,13 @@ def GCN_unsup_loss(embeds, context_pairs, neg_samples):
     loss = torch.sum(true_xent + negative_xent)
     return loss
 
-def GCN_train(epochs, model, optimizer, context_pairs, neg_nodes):
+def GCN_train(epochs, model, optimizer, context_pairs, neg_nodes, max_samples=None):
     for e in range(epochs):
         model.train()
         optimizer.zero_grad()
         # Get node embeddings
         forward_pass = model.forward()
-        loss = GCN_unsup_loss(forward_pass, context_pairs, neg_nodes)
+        loss = GCN_unsup_loss(forward_pass, context_pairs, neg_nodes, max_samples=max_samples)
         l = loss.item()
         print("Epoch %d: Loss: %2f" % (e, l))
         loss.backward()
@@ -143,7 +170,7 @@ class QW_Cora(Q_Walk_Simplified):
         self.cs = torch.nn.CosineSimilarity()
         
     def reward(self, s,a,s_prime,nid):
-        return self.cs(self.data.x[nid],self.data.x[a]).unsqueeze(-1)
+        self.max_sim_reward(s,a,s_prime,nid)
 
 from sklearn.decomposition import PCA
 def preprocess(X):
@@ -194,7 +221,8 @@ def get_walks(Encoder, non_orphans, nw=10, wl=5, strategy='random'):
         strategy=strategy
     )
 
-def get_gcn_embeddings(data, walks, text='random', epochs=50):
+def get_gcn_embeddings(data, walks, text='random', epochs=25, lr=0.01,
+                       as_numpy=True, max_samples=None):
     print("Generating aux data for unsupervised GCN training w/ %s walks..." % text)
     context_pairs, neg_nodes = gen_aux_train_data_tensors(walks)
     
@@ -203,16 +231,17 @@ def get_gcn_embeddings(data, walks, text='random', epochs=50):
     optimizer = torch.optim.Adam([
         dict(params=model.conv1.parameters(), weight_decay=5e-4),
         dict(params=model.conv2.parameters(), weight_decay=5e-4)
-    ], lr=0.001) 
+    ], lr=lr) 
 
     # Train it
     print("Training GCN w/ %s walks..." % text)
-    GCN_train(epochs, model, optimizer, context_pairs, neg_nodes)
+    GCN_train(epochs, model, optimizer, context_pairs, neg_nodes, max_samples=max_samples)
     
     model.eval()
-    embeds = model.forward().detach().numpy()
     
-    return embeds
+    embeds = model.forward().detach()
+    
+    return embeds.numpy() if as_numpy else embeds
 
 # And now we can evaluate
 # Now want to use embeddings to predict label

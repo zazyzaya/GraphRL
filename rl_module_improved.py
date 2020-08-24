@@ -273,3 +273,44 @@ class Q_Walk_Simplified(Q_Walker_Improved):
             :, 
             :self.data.edge_index.size()[1]//2
         ]
+        
+    def min_sim_reward(self, s,a,s_prime,nid):
+        return 1-self.cs(self.data.x[nid], self.data.x[a]).unsqueeze(-1)    
+    
+    def max_sim_reward(self, s,a,s_prime,nid):
+        sim = self.cs(self.data.x[nid],self.data.x[a]).unsqueeze(-1)
+        
+        # Punish returning walking toward "yourself"
+        sim[sim==1] = 0
+        
+        return sim 
+    
+    '''
+    Calculates Sørenson Index:
+
+        | N(u) && N(v) |
+        ----------------
+        |N(u)|  + |N(v)|
+    
+    Useful for well-clustered graphs and balances
+    for outliers 
+    '''
+    def sorenson_reward(self, s, a, s_prime, nid):
+        src = self.action_map[nid]
+        dst = self.action_map[a]
+        
+        # So two non-edges don't count as a shared edge
+        dst[dst == -1] = -2
+        
+        # Kind of (painfully) slow, but I can't find a torch op that 
+        # does this
+        return torch.tensor(
+            [[
+                np.intersect1d(src[i,:],dst[i,:]).shape[0] 
+                for i in range(src.size()[0])
+            ]],
+            dtype=torch.float 
+        ).T.true_divide(
+            (src >= 0).sum(axis=1, keepdim=True) + 
+            (dst >= 0).sum(axis=1, keepdim=True)
+        )
