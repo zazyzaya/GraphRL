@@ -136,14 +136,28 @@ def set_up_citeseer(wl=10, nw=10, epsilon=0.5, gamma=0.99, early_stopping=0.03,
 
 def test_gcn_agent(trials=1, set_up_fn=set_up_cora, include_random=False):
     
-    Agent, Encoder, non_orphans = set_up_fn(wl=10, nw=20, epsilon=0.75, epochs=50)
+    Agent, Encoder, non_orphans = set_up_fn(wl=10, nw=40, epsilon=0.6, epochs=50, gamma=0.9999)
     
     rw = []
     pww = []
     pgw = []
     
-    max_samples=2**12
+    max_samples=2**18
     epochs=25
+    
+    gcn_settings=dict(hidden=128, out=128)
+    
+    encoder_kwargs=dict(
+        encode=False,
+        strings=False,
+        silent=False
+    )
+    embedder_kwargs=dict(
+        as_numpy=False,
+        max_samples=max_samples,
+        epochs=epochs,
+        gcn_kwargs=gcn_settings
+    )
     
     # Remask the edges before giving it to GCN
     all_edges = Agent.data.edge_index
@@ -157,14 +171,10 @@ def test_gcn_agent(trials=1, set_up_fn=set_up_cora, include_random=False):
                     Encoder.generate_walks_fast(
                         batch=non_orphans, 
                         strategy='random', 
-                        encode=False,
-                        strings=False,
-                        silent=False
+                        **encoder_kwargs
                     ),
                     text='random',
-                    as_numpy=False,
-                    max_samples=max_samples,
-                    epochs=epochs
+                    **embedder_kwargs
                 )
             )
             
@@ -174,14 +184,10 @@ def test_gcn_agent(trials=1, set_up_fn=set_up_cora, include_random=False):
                 Encoder.generate_walks_fast(
                     batch=non_orphans, 
                     strategy='weighted', 
-                    encode=False,
-                    strings=False,
-                    silent=False
+                    **encoder_kwargs
                 ),
                 text='weighted',
-                as_numpy=False,
-                max_samples=max_samples,
-                epochs=epochs
+                **embedder_kwargs
             )
         )
         pgw.append(
@@ -190,14 +196,10 @@ def test_gcn_agent(trials=1, set_up_fn=set_up_cora, include_random=False):
                 Encoder.generate_walks_fast(
                     batch=non_orphans, 
                     strategy='egreedy', 
-                    encode=False,
-                    strings=False,
-                    silent=False
+                    **encoder_kwargs
                 ),
                 text='e-greedy',
-                as_numpy=False,
-                max_samples=max_samples,
-                epochs=epochs
+                **embedder_kwargs
             )
         )
     

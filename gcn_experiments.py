@@ -66,7 +66,7 @@ def gen_aux_train_data(walks):
     neg_nodes = np.array(neg_nodes)
     return context_pairs, neg_nodes
 
-def gen_aux_train_data_tensors(walks, window=5):
+def gen_aux_train_data_tensors(walks, window=5, num_neg_samples=5):
     print("Generating pos samples")
     context_pairs = []
      
@@ -81,33 +81,36 @@ def gen_aux_train_data_tensors(walks, window=5):
     
     # Encode tuples for fast lookup to make sure negative samples
     # aren't present. Convert from tuple to unique int and store as a set
+    print("Building set of known edges")
     exp = torch.tensor([walks.max().item(), 1])
     encode = lambda x : (x*exp).sum(axis=1)
     enc_pairs = torch.tensor(list(set(encode.item() for encode in (context_pairs*exp).sum(axis=1))))
     
     print("Generating neg samples")
-    num_neg_samples = 5
     neg_samples = torch.tensor(
         np.random.choice(walks.flatten().unique().numpy(), size=(walks.max().item()+1,num_neg_samples))
     )
     
     print("Filtering out false negatives")
-    give_up=5
-    for col in tqdm(range(neg_samples.size()[1])):
+    give_up=3
+    for col in range(neg_samples.size()[1]):
         tries = 0
-        enc = torch.stack(
-            (
-                torch.arange(0,walks.max().item()+1,dtype=torch.long), 
-                neg_samples[:, col]
-            ), 
-            dim=1
-        )
         
-        enc = encode(enc)
         while tries < give_up:
+            enc = torch.stack(
+                (
+                    torch.arange(0,walks.max().item()+1,dtype=torch.long), 
+                    neg_samples[:, col]
+                ), 
+                dim=1
+            )
+            
+            enc = encode(enc)
+            
             # Returns all indices that have elements contained in enc_pairs
             dupes = enc.view(1,-1).eq(enc_pairs.view(-1,1)).sum(0).bool()
             num_dupes = dupes.sum().item()
+            print("%d false negatives remain in neg sample batch %d/%d" % (num_dupes, col+1, num_neg_samples))
             
             if num_dupes == 0:
                 break 
@@ -118,25 +121,21 @@ def gen_aux_train_data_tensors(walks, window=5):
             )
             tries += 1
         
+        if tries == give_up:
+            print("Gave up on finding perfect negative samples")
+        
     # Then sample all indices used by pos samples in order
     neg_samples = neg_samples[context_pairs[:,0]]
     return context_pairs.numpy(), neg_samples.numpy()
 
 # Skip-gram like Unsupervised loss based on similarity of context pairs and dissimilarity of neg samples
-def GCN_unsup_loss(embeds, context_pairs, neg_samples, max_samples=None):
+def GCN_unsup_loss(embeds, context_pairs, neg_samples):
     input_embeds = embeds[context_pairs[:,0]]
     context_embeds = embeds[context_pairs[:,1]]
     neg_embeds = embeds[neg_samples]
-
-    if max_samples:
-        rnd = torch.randperm(neg_embeds.size()[0])[:max_samples]
-        input_embeds = input_embeds[rnd, :]
-        context_embeds = context_embeds[rnd, :]
-        neg_embeds = neg_embeds[rnd, :]
         
     # neg embeds is avg of all neg samps
-    num_neg_samples = neg_embeds.size()[1]
-    neg_embeds_avg = torch.true_divide(neg_embeds.sum(axis=1),num_neg_samples)
+    neg_embeds_avg = neg_embeds.mean(dim=1)
 
     # Compute affinity between input nodes & context nodes (nodes that co-occur on random walks)
     aff = input_embeds * context_embeds
@@ -148,16 +147,39 @@ def GCN_unsup_loss(embeds, context_pairs, neg_samples, max_samples=None):
     loss = torch.sum(true_xent + negative_xent)
     return loss
 
-def GCN_train(epochs, model, optimizer, context_pairs, neg_nodes, max_samples=None):
+import time 
+def GCN_train(epochs, model, optimizer, context_pairs, neg_nodes,
+                max_samples=None):
+    model.train()
     for e in range(epochs):
-        model.train()
+        start = time.time()
         optimizer.zero_grad()
-        # Get node embeddings
+        
+        num_pairs = context_pairs.shape[0]
+        tot_loss = 0
+
+        # Get node embeddings (if you pull this out of
+        # the loop opt.backward() gets really sad)
         forward_pass = model.forward()
-        loss = GCN_unsup_loss(forward_pass, context_pairs, neg_nodes, max_samples=max_samples)
-        l = loss.item()
-        print("Epoch %d: Loss: %2f" % (e, l))
+        
+        if max_samples:
+            sample_range = torch.randint(high=num_pairs, size=(max_samples,))
+            
+            loss = GCN_unsup_loss(
+                forward_pass, 
+                context_pairs[sample_range, :], 
+                neg_nodes[sample_range, :]
+            )
+        else:
+            loss = GCN_unsup_loss(
+                forward_pass, 
+                context_pairs,
+                neg_nodes,
+            )
+            
         loss.backward()
+        
+        print("Epoch %d: Loss: %2f\t (%0.4f s)" % (e, loss.item(), time.time()-start))
         optimizer.step()
 
 # For RL walks
@@ -222,12 +244,12 @@ def get_walks(Encoder, non_orphans, nw=10, wl=5, strategy='random'):
     )
 
 def get_gcn_embeddings(data, walks, text='random', epochs=25, lr=0.01,
-                       as_numpy=True, max_samples=None):
+                       as_numpy=True, max_samples=None, gcn_kwargs={}):
     print("Generating aux data for unsupervised GCN training w/ %s walks..." % text)
     context_pairs, neg_nodes = gen_aux_train_data_tensors(walks)
     
     # Build the model
-    model = GCN(data)
+    model = GCN(data, **gcn_kwargs)
     optimizer = torch.optim.Adam([
         dict(params=model.conv1.parameters(), weight_decay=5e-4),
         dict(params=model.conv2.parameters(), weight_decay=5e-4)
