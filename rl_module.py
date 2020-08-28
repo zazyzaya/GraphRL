@@ -595,7 +595,7 @@ class RW_Encoder():
                 
     
     
-    def encode_nodes(self, batch=[], walks=None, random=False, w2v_params={}, weighted=False):
+    def encode_nodes(self, batch=[], walks=None, random=False, w2v_params={}, weighted=False, quiet=False):
         # Make sure required params exist in w2v_params 
         required = dict(size=128, sg=1, workers=16)
         for k,v in required.items():
@@ -605,22 +605,84 @@ class RW_Encoder():
         if walks == None:
             walks = self.generate_walks(batch=batch, workers=w2v_params['workers'], random=random, weighted=weighted)
             
-        print(walks[0])
+        if not quiet:
+            print(walks[0])
+            
         model = Word2Vec(walks, **w2v_params)
         
         idx_order = torch.tensor([int(i) for i in model.wv.index2entity], dtype=torch.long)
-        X = torch.zeros((idx_order.max()+1, w2v_params['size']), dtype=torch.float)
+        X = torch.zeros((self.walker.data.x.size()[0], w2v_params['size']), dtype=torch.float)
         
         # Put embeddings back in order
         X[idx_order] = torch.tensor(model.wv.vectors)
-        y = self.walker.data.y[:batch.max(), :]     
+        y = self.walker.data.y[:batch.max()+1, :]     
         
         # It seems like training more models improves later models'
         # accuracy? Putting this in to absolutely make sure runs
         # are indipendant
-        del model    
+        del model   
+        
+        # Only select nodes with embeddings
+        X = X[batch]
+        y = y[batch] 
         
         return X, y
+    
+    def generate_mixed_walks(self, batch, mix_ratio=0.6, encode=True, 
+                             silent=True, strategy='weighted'):
+        nw = self.walker.num_walks 
+        
+        assert mix_ratio >= 0 and mix_ratio <= 1, "Mix ratio must be IR in [0,1]"
+        
+        if type(batch) != torch.Tensor:
+            batch = torch.tensor(batch)
+        
+        if mix_ratio > 0:
+            self.walker.num_walks = int(nw*mix_ratio)
+            rand_walks = self.walker.fast_walks(
+                batch,
+                strategy='random',
+                silent=silent,
+                strings=True
+            )
+        else:
+            rand_walks = []
+        
+        if mix_ratio != 1:
+            self.walker.num_walks = int(nw*(1-mix_ratio))
+            policy_walks = self.walker.fast_walks(
+                batch,
+                strategy=strategy,
+                silent=silent,
+                strings=True
+            )
+        else:
+            policy_walks = []
+        
+        self.walker.num_walks = nw
+        return self.encode_nodes(batch, walks=policy_walks+rand_walks, quiet=True)
+    
+    def get_accuracy_report(self,X,y,multiclass=False,test_size=0.1):
+        if multiclass:
+            estimator = lambda : OVR(LR(), n_jobs=16)
+            y_trans = lambda y : y 
+        else:
+            estimator = lambda : LR(n_jobs=16, max_iter=1000)
+            y_trans = lambda y : y.argmax(axis=1)
+            
+        lr = estimator()
+        Xtr, Xte, ytr, yte = train_test_split(
+            X, y_trans(y), 
+            stratify=y_trans(y), 
+            test_size=test_size,
+            random_state=1337
+        )
+        
+        lr.fit(Xtr, ytr)
+        yprime = lr.predict(Xte)
+        
+        return classification_report(yprime, yte, output_dict=True)
+        
     
     def compare_to_random(self, batch, w2v_params={}, multiclass=False, fast_walks=False):
         if type(batch) != torch.Tensor and fast_walks:
@@ -773,7 +835,7 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
         if minibatch_bootstrap and sample_size:
             sample_size = int(sample_size * 1.5) if sample_size < non_orphans.shape[0] // 1.5 else None
         
-    s,a,r = Agent.fast_episode_generation(batch=batch, nw=1)
+    s,a,r = Agent.fast_episode_generation(batch=non_orphans, nw=1)
     print(Agent.Q(s,a)[:10])
     return non_orphans
 

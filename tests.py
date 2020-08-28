@@ -2,7 +2,9 @@ import torch
 import load_graphs as lg
 import pickle as pkl
 import torch.nn.functional as F
+import pandas as pd
 
+from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score 
 from sklearn.multiclass import OneVsRestClassifier as OVR
@@ -13,82 +15,93 @@ from rl_module_improved import Q_Walk_Simplified
 
 class QW_Cora(Q_Walk_Simplified):
     def __init__(self, data, gamma=0.99, epsilon=lambda x: 0.5, episode_len=10,
-                 num_walks=10, hidden=64, one_hot=False, network=None):
+                 num_walks=10, hidden=64, one_hot=False, network=None, beta=1):
         super().__init__(data, gamma=gamma, epsilon=epsilon, episode_len=episode_len,
                          num_walks=num_walks, hidden=hidden, one_hot=one_hot, network=network)
-        
-        self.max_degree = degree(data.edge_index[0]).max()
-        self.cs = torch.nn.CosineSimilarity()
-        
+
+        self.beta = beta
     
     def reward(self, s,a,s_prime,nid):
-        return self.cs(self.data.x[nid],self.data.x[a]).unsqueeze(-1)
-    
+        # Sim reward is how similar node feats are
+        # Sorenson index is how similar node structures are
+        #return self.sorensen_reward(s,a,s_prime,nid)+self.max_sim_reward(s,a,s_prime,nid)
+        
+        if self.beta > 0:
+            struct_r = self.sorensen_reward(s,a,s_prime,nid)
+        # Don't calculate if no need. Kind of expensive
+        else:
+            struct_r = torch.zeros((s.size()[0],1))
+            
+        if self.beta != 1:
+            feat_r = self.max_sim_reward(s,a,s_prime,nid)
+        else:
+            feat_r = torch.zeros((s.size()[0],1))
+            
+        # Cubed to try to push close values further apart while keeping the sign 
+        # the same (even though it's always positive... just in case)
+        return torch.pow((self.beta * struct_r) + ((1-self.beta) * feat_r), 3)
+        
+        
 
-def cora(sample_size=50, clip=None, reparam=40,
-            gamma=0.99, nw=10, wl=5, epsilon=0.95):
+def cora(sample_size=50, gamma=1, nw=10, wl=5, epsilon=0.95,
+        epochs=50, early_stopping=0.001, trials=10):
     print("Testing the CORA dataset")
     data = lg.load_cora()
+    
+    print("Running PCA on node features")
+    data.x = preprocess(data.x)
     
     # Set up a basic agent 
     Agent = QW_Cora(data, episode_len=wl, num_walks=nw, 
                            epsilon=lambda x : epsilon, gamma=gamma,
-                           hidden=1028, one_hot=True)
+                           hidden=2048, one_hot=True, beta=0.5)
 
+    Agent.remove_direction()
     Encoder = RW_Encoder(Agent)
+    Agent.update_action_map()
     
-    non_orphans = train_loop(Agent, sample_size=sample_size, early_stopping=0.01,
-                             reparam=0.05, clip=clip, decreasing_param=False,
-                             verbose=0, gamma_depth=10)    
+    train_settings = dict(
+        verbose=1,
+        early_stopping=early_stopping,
+        nw=min(nw, 5),
+        wl=min(wl, 20),
+        epochs=epochs,
+        sample_size=None
+    )
     
-    Encoder.compare_to_random(non_orphans, w2v_params={'size': 128}, fast_walks=True)
+    # First get value estimates
+    non_orphans = fast_train_loop(Agent, lr=1e-4, **train_settings) 
+    
+    # Then get optimal value estimates
+    train_settings['early_stopping'] *= 10
+    fast_train_loop(Agent, strategy='perfect', lr=1e-5, **train_settings)
+    
+    print(Agent.qNet(Agent.state_transition(torch.tensor([[0]])))
+          * torch.clamp(Agent.action_map[0]+1, max=1))  
+    
+    for i in range(nw,-1,-nw//5):
+        print()
+        all_stats = {'acc':[], 'prec':[], 'rec':[], 'f1':[]}
+        for _ in tqdm(range(trials), desc="%d%% random walks" % ((i/nw)*100)):
+            X,y = Encoder.generate_mixed_walks(non_orphans, mix_ratio=i/nw)
+            stats = Encoder.get_accuracy_report(X,y,test_size=0.25)
+            
+            all_stats['acc'].append(stats['accuracy'])
+            all_stats['prec'].append(stats['weighted avg']['precision'])
+            all_stats['rec'].append(stats['weighted avg']['recall'])
+            all_stats['f1'].append(stats['weighted avg']['f1-score'])
+            
+        df = pd.DataFrame(all_stats)
+        df = pd.DataFrame([df.mean(), df.sem()])
+        df.index = ['mean', 'stderr']
+        print(df)
+    
     return Agent
   
 from sklearn.decomposition import PCA
 def preprocess(X):
     decomp = PCA(n_components=256, random_state=1337)
     return torch.tensor(decomp.fit_transform(X.numpy()))
-
-def cora_fast(wl=5, nw=10, gamma=0.99, eps=0.95, early_stopping=0.1):
-    print("Testing the CORA dataset")
-    data = lg.load_cora()
-    
-    print("Running PCA on features")
-    data.x = preprocess(data.x)
-    
-    # Set up a basic agent 
-    Agent = QW_Cora(
-        data, episode_len=wl, num_walks=nw, 
-        epsilon=lambda x : eps, gamma=gamma,
-        hidden=1028, one_hot=True
-    )
-
-    Encoder = RW_Encoder(Agent)
-    
-    non_orphans = fast_train_loop(
-        Agent, 
-        verbose=0, 
-        early_stopping=early_stopping, 
-        epochs=200,
-        nw=3
-    )    
-    
-    Encoder.compare_to_random(
-        non_orphans, 
-        w2v_params={'size': 128}, 
-        fast_walks=True
-    )
-    
-    return Agent
-
-def test_cora():  
-    Agent = cora_fast(
-        gamma=0.99999, 
-        eps=0.75, 
-        nw=10, 
-        wl=10,
-        early_stopping=0.01
-    )
 
 class Be_Quiet():
     def __init__(self):
@@ -99,7 +112,7 @@ class Be_Quiet():
         pass
     
 if __name__ == '__main__':
-    test_cora()
+    cora()
 
 import sys 
 def test_epsilon_cora():
@@ -149,49 +162,3 @@ def test_epsilon_cora():
         sys.stdout = og
         print('*' * int(acc * 50), end='\t')
         print('(%0.3f) Epsilon: %d' % (acc, i))
-
-#test_epsilon_cora()
-
-'''
-Need to seriously improve how single state-action-reward tuples
-are generated before this is feasible
-
-class QW_Blog(Q_Walk_Simplified):
-    def __init__(self, data, gamma=0.99, epsilon=lambda x: 0.5, episode_len=10,
-                 num_walks=10, hidden=64, one_hot=False, network=None):
-        super().__init__(data, gamma=gamma, epsilon=epsilon, episode_len=episode_len,
-                         num_walks=num_walks, hidden=hidden, one_hot=one_hot, network=network)
-        
-        self.max_nodes = 9400 # For some reason the degree fn breaks so just hard coding it
-        
-    def reward(self, s,a,s_prime,nid):
-        return torch.log(
-            torch.tensor([self.max_nodes / self.csr[a].indices.shape[0]])
-        )
-
-def blog(sample_size=50, clip=None, reparam=40,
-            gamma=0.99, nw=10, wl=5, epsilon=0.95):
-    print("Testing the Blog Catalogue dataset")
-    data = lg.load_blog()
-    
-    # Set up a basic agent 
-    Agent = QW_Blog(data, episode_len=wl, num_walks=nw, 
-                           epsilon=lambda x : epsilon, gamma=gamma,
-                           hidden=1028, one_hot=True)
-
-    Encoder = RW_Encoder(Agent)
-    
-    non_orphans = train_loop(Agent, sample_size=sample_size, early_stopping=0.05,
-                             reparam=0.05, clip=clip, decreasing_param=False,
-                             gamma_depth=10)    
-    
-    Encoder.compare_to_random(non_orphans, w2v_params={'size': 128}, multiclass=True)
-    return Agent
-
-def test_blog():
-    # Using original n2v parameters
-    Agent = blog(sample_size=100, gamma=0.99, epsilon=0.5, reparam=0.05,
-                 nw=10, wl=80)
-    
-test_blog()
-'''

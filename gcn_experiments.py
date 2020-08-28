@@ -31,8 +31,8 @@ class GCN(torch.nn.Module):
         x = F.relu(self.conv1(x, edge_index))
         x = F.dropout(x, training=self.training)
         x = self.conv2(x, edge_index)
-        #return F.log_softmax(x, dim=1)
-        return x
+        return torch.tanh(x)
+        #return x
 
 # Function that takes node sequences and returns additional data for unsupervised training
 # Specifically, it returns a set of nodes that co-occur on random walks (context_pairs)
@@ -66,7 +66,7 @@ def gen_aux_train_data(walks):
     neg_nodes = np.array(neg_nodes)
     return context_pairs, neg_nodes
 
-def gen_aux_train_data_tensors(walks, window=5, num_neg_samples=5):
+def gen_aux_train_data_tensors(walks, window=10, num_neg_samples=5):
     print("Generating pos samples")
     context_pairs = []
      

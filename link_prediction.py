@@ -125,7 +125,7 @@ def evaluate(embeddings, pos_samples, neg_samples, bin_op='hadamard', test_size=
     X = torch.cat([X_pos, X_neg], dim=0)
     
     # Convert to numpy for sklearn
-    X = X.numpy()
+    X = torch.sigmoid(X).numpy() 
     y = y.numpy()
     
     Xtr, Xte, ytr, yte = train_test_split(
@@ -133,7 +133,11 @@ def evaluate(embeddings, pos_samples, neg_samples, bin_op='hadamard', test_size=
     )
     
     # Then we train the Logistic Regression unit 
-    LR = LogisticRegressionCV(cv=10, max_iter=2000, scoring='roc_auc')
+    LR = LogisticRegressionCV(
+        cv=10, 
+        max_iter=2000, 
+        scoring='roc_auc'
+    )
     LR.fit(Xtr, ytr)
     
     confidence = LR.predict_proba(Xte)

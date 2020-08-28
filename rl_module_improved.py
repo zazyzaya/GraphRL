@@ -1,5 +1,6 @@
 import torch 
 import random 
+import numpy as np
 
 from tqdm import tqdm
 from rl_module import Q_Walker
@@ -41,8 +42,10 @@ class Q_Walker_Improved(Q_Walker):
         if not state_feats:
             state_feats = data.num_nodes
         
+        self.state_feats = state_feats
+        self.hidden = hidden
         if not network:
-            network = Q_Network_No_Action(state_feats, self.max_actions, hidden)
+            network = Q_Network_No_Action(self.state_feats, self.max_actions, hidden)
         
         super().__init__(data, state_feats=state_feats, action_feats=0, 
                         gamma=gamma, epsilon=epsilon, episode_len=episode_len,
@@ -55,6 +58,11 @@ class Q_Walker_Improved(Q_Walker):
     Call this after all preprocessing and before training
     '''   
     def update_action_map(self):
+        self.max_actions = max(
+            degree(self.data.edge_index[0]).max().long().item(),
+            degree(self.data.edge_index[1]).max().long().item()
+        )
+        
         self.action_map = torch.full(
             (self.data.num_nodes, self.max_actions),
             -1,
@@ -64,6 +72,9 @@ class Q_Walker_Improved(Q_Walker):
         for i in range(self._get_csr().shape[0]):
             for j,idx in enumerate(self.csr[i].indices):
                 self.action_map[i][j] = idx
+                
+        self.qNet.max_actions = self.max_actions
+        self.qNet.reset_parameters()
         
     '''
     Assumes a is a mask s.t. a == [0,0,1,...] corresponds to taking action 
@@ -120,6 +131,14 @@ class Q_Walker_Improved(Q_Walker):
             if test[test == -1].sum() > 0:
                 print("Uh oh")
              
+        # The same as e-greedy set e to 1.0. Useful for finding Q*(s,a)
+        elif strategy=='perfect':
+            ret = torch.argmax(
+                F.relu(value_estimates) + torch.clamp(self.action_map[nids]+1, max=1)*1e-10, 
+                dim=1
+            )
+            
+        
         # If neither, assume random is the policy   
         else:
             ret = torch.multinomial(
@@ -231,6 +250,7 @@ class Q_Walk_Simplified(Q_Walker_Improved):
                  num_walks=10, hidden=64, one_hot=False, network=None, frozen=True):
         
         self.one_hot = one_hot
+        self.cs = torch.nn.CosineSimilarity()
         
         # Don't bother with node features at all 
         # Make sure to update state/action transition functions accordingly
@@ -286,6 +306,46 @@ class Q_Walk_Simplified(Q_Walker_Improved):
         return sim 
     
     '''
+    While this does work, the numpy version that iterates
+    through each row is slightly faster. Oh well
+    '''
+    def shared_neighbors_tensors(self,src,dst):
+        dst[dst == -1] = -2
+        
+        # You've just gotta trust me on this one. This works, I promise
+        num_shared = (
+                src == dst.unsqueeze(-1).transpose(0,1)
+            ).transpose(1,0).sum(axis=1).sum(axis=1,keepdim=True)
+    
+        return num_shared
+    
+    '''
+    Most memory efficient way of doing this, but not as fast
+    as the dense adj method
+    '''
+    def shared_neighbors_np(self,src,dst):
+        dst[dst == -1] = -2
+        
+        return torch.tensor(
+            [
+                [
+                    np.intersect1d(
+                        src[i].numpy(),
+                        dst[i].numpy()
+                    ).shape[0]
+                for i in range(src.size()[0])]
+            ]
+        ).T
+        
+    '''
+    Fastest, but obvi most memory intensive way to accomplish
+    this. For large graphs this will be intractable
+    '''
+    def shared_neighbors_dense_adj(self,src,dst):
+        adj = self._get_dense_adj()
+        return adj[src.long()].logical_and(adj[dst.long()]).sum(dim=1,keepdim=True)
+    
+    '''
     Calculates Sørenson Index:
 
         | N(u) && N(v) |
@@ -295,22 +355,19 @@ class Q_Walk_Simplified(Q_Walker_Improved):
     Useful for well-clustered graphs and balances
     for outliers 
     '''
-    def sorenson_reward(self, s, a, s_prime, nid):
+    def sorensen_reward(self, s, a, s_prime, nid):
         src = self.action_map[nid]
         dst = self.action_map[a]
         
         # So two non-edges don't count as a shared edge
-        dst[dst == -1] = -2
+        #dst[dst == -1] = -2
         
-        # Kind of (painfully) slow, but I can't find a torch op that 
-        # does this
-        return torch.tensor(
-            [[
-                np.intersect1d(src[i,:],dst[i,:]).shape[0] 
-                for i in range(src.size()[0])
-            ]],
-            dtype=torch.float 
-        ).T.true_divide(
+        ret = self.shared_neighbors_dense_adj(
+            nid,a
+        ).float().true_divide(
             (src >= 0).sum(axis=1, keepdim=True) + 
             (dst >= 0).sum(axis=1, keepdim=True)
         )
+        
+        ret[nid == a] = 0
+        return ret
