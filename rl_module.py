@@ -535,7 +535,8 @@ class RW_Encoder():
         if type(batch) != torch.Tensor:
             batch = torch.tensor(batch)
             
-        print("Generating %s walks" % strategy)
+        if not silent:
+            print("Generating %s walks" % strategy)
         
         with torch.no_grad():
             if not encode:
@@ -553,7 +554,7 @@ class RW_Encoder():
                     strings=True
             )
         
-        return self.encode_nodes(batch=batch, walks=walks, w2v_params=w2v_params)
+        return self.encode_nodes(batch=batch, walks=walks, w2v_params=w2v_params, quiet=silent)
     
     def generate_walks(self, batch=[], workers=-1, random=False, 
                        egreedy=True, quiet=False, include_labels=False,
@@ -817,7 +818,7 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
             if sample_size and verbose > 1:
                 print("\t[%d-%d]: %0.5f" % (e,steps,loss.item()))
             
-            
+            avg_g = r.mean()
             tot_loss += loss.item()
             steps += 1
     
@@ -826,7 +827,7 @@ def fast_train_loop(Agent, sample_size=None, clip=None, lr=1e-4, verbose=1,
         if sample_size:
             tot_loss = tot_loss/steps
         
-        print("[%d]: %0.5f \t\t(%0.4f s.)" % (e, tot_loss, time.time()-start))
+        print("[%d]: loss: %0.5f \t avg G_t: %0.5f \t(%0.4f s.)" % (e, tot_loss, avg_g, time.time()-start))
         
         if tot_loss <= early_stopping:
             print("Early stopping")

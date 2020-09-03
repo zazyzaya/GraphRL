@@ -236,10 +236,9 @@ class Q_Walker_Improved(Q_Walker):
         
         rewards = torch.cat(rewards, dim=1)    
         
-        discount = torch.tensor([self.gamma ** i for i in range(wl+1)])
-        rewards *= discount
-        rewards = rewards.sum(dim=1, keepdim=True)
-        
+        discount = torch.tensor([[self.gamma ** i for i in range(wl+1)]])
+        rewards = torch.mm(rewards, discount.T)
+                
         # Then find average reward of random walks
         rewards = scatter_mean(rewards.T, idx).T
         return state, action, rewards
