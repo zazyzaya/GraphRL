@@ -81,7 +81,13 @@ def generic_test(data, trials, num_tests, max_eps, agent_params=default_agent_pa
     print(Agent.qNet(Agent.state_transition(torch.tensor([[0]])))
           * torch.clamp(Agent.action_map[0]+1, max=1))  
     
-    print(" nw=%d\n wl=%d\n beta=%0.2f\n gamma=%f" % (nw, wl, beta, gamma))
+    print(" nw=%d\n wl=%d\n beta=%0.2f\n gamma=%f" % (
+            train_settings['nw'], 
+            train_settings['wl'], 
+            agent_params['beta'], 
+            agent_params['gamma']
+        )
+    )
     for i in range(0,nw+1,nw//num_tests):
         print()
         eps = (i/nw) * max_eps
