@@ -4,13 +4,14 @@ import pandas as pd
 from torch_geometric.data import Data 
 from torch_geometric.utils import add_remaining_self_loops
 
-from torch_geometric.datasets import PPI,Reddit
+from torch_geometric.datasets import Reddit
 
 # File locations
 DATA = '/mnt/raid0_24TB/datasets/'
 CORA = DATA + 'cora/'
 BLOG = DATA + 'n2v_benchmarks/BlogCatalog-dataset/'
 CITE = DATA + 'citeseer/'
+PPI = DATA + 'n2v_benchmarks/Homo_sapiens.mat'
 
 def load_cora():
     edges = pd.read_csv(CORA + 'cora_cites.csv')
@@ -148,14 +149,33 @@ def load_citeseer():
         y=y
     )
 
-
-
+'''
+def remove_classes_less_than(data,percent=0.05):
+    class_cnt = (data.y.unique().unsqueeze(-1) == data.y).sum(dim=1).float()
+    class_cnt = class_cnt.true_divide(class_cnt.sum())
+    remove = class_cnt <= percent
+    
+    to_remove = remove[data.y].nonzero()
+    delete0 = (data.edge_index[0] == to_remove).sum(dim=0)
+    delete1 = (data.edge_index[1] == to_remove).sum(dim=0)
+    delete = delete0.logical_or(delete1)
+    
+    # Nodes in classes too small to matter are removed from 
+    # edge list. They will be filtered out before training
+    # as they are now orphans
+    data.edge_index = data.edge_index[:,~delete]
+'''
+    
+from scipy.io import loadmat
+from torch_geometric.utils import from_scipy_sparse_matrix
 def load_ppi():
-    print("Loading ppi...")
-    root='/tmp/ppi'
-    d = PPI(root=root).data
-    return d
-
+    mat = loadmat(PPI)
+    ei = from_scipy_sparse_matrix(mat['network'])[0]
+    y = torch.tensor(mat['group'].todense(), dtype=torch.long)
+    X = torch.eye(y.size()[0])
+    
+    return Data(x=X, y=y, edge_index=ei)
+    
 
 def load_reddit():
     print("Loading reddit...")

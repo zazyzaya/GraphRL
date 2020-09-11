@@ -670,11 +670,12 @@ class RW_Encoder():
         else:
             estimator = lambda : LR(n_jobs=16, max_iter=1000)
             y_trans = lambda y : y.argmax(axis=1)
-            
+         
+        strat = y_trans(y) if not multiclass else None   
         lr = estimator()
         Xtr, Xte, ytr, yte = train_test_split(
             X, y_trans(y), 
-            stratify=y_trans(y), 
+            stratify=strat, 
             test_size=test_size,
             random_state=1337
         )

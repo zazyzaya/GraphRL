@@ -4,6 +4,12 @@ import pickle as pkl
 import torch.nn.functional as F
 import pandas as pd
 
+# Suppresses sklearn warnings
+def warn(*args, **kwargs):
+    pass
+import warnings
+warnings.warn = warn
+
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score 
@@ -59,19 +65,23 @@ train_settings = dict(
     early_stopping=0.001,
     nw=5,
     wl=20,
-    epochs=2,
+    epochs=50,
     sample_size=None,
     lr=1e-5
 )
 
 def generic_test(data, trials, num_tests, max_eps, agent_params=default_agent_params,
-                 train_settings=train_settings):
+                 train_settings=train_settings, undirected=True, preprocess=True,
+                 multiclass=False):
     
-    print("Running PCA on node features")
-    data.x = preprocess(data.x)
+    if preprocess:
+        print("Running PCA on node features")
+        data.x = preprocess(data.x)
     
     Agent = QW_Cora(data, **agent_params)
-    Agent.remove_direction()
+    if undirected:
+        Agent.remove_direction()
+    
     Agent.update_action_map()
     
     Encoder = RW_Encoder(Agent)
@@ -93,13 +103,19 @@ def generic_test(data, trials, num_tests, max_eps, agent_params=default_agent_pa
         print()
         eps = (i/nw) * max_eps
         Agent.epsilon = lambda x : eps/100
-        all_stats = {'acc':[], 'prec':[], 'rec':[], 'f1':[]}
+        all_stats = {'prec':[], 'rec':[], 'f1':[]}
+        
+        if not multiclass:
+            all_stats['acc'] = []
+            
         for _ in tqdm(range(trials), desc="%d%% random walks" % (100-eps)):
             #X,y = Encoder.generate_mixed_walks(non_orphans, mix_ratio=i/nw)
             X,y = Encoder.generate_walks_fast(non_orphans, strategy='egreedy', silent=True, encode=True)
-            stats = Encoder.get_accuracy_report(X,y,test_size=0.25)
+            stats = Encoder.get_accuracy_report(X,y,test_size=0.25,multiclass=multiclass)
             
-            all_stats['acc'].append(stats['accuracy'])
+            if not multiclass:
+                all_stats['acc'].append(stats['accuracy'])
+                
             all_stats['prec'].append(stats['weighted avg']['precision'])
             all_stats['rec'].append(stats['weighted avg']['recall'])
             all_stats['f1'].append(stats['weighted avg']['f1-score'])
@@ -140,8 +156,8 @@ def citeseer(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
         train_settings=train_settings
     )
 
-def ppi(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
-         num_tests=5, max_eps=20, beta=0.25):
+def ppi(gamma=1-1e-3, nw=5, wl=10, epsilon=0.95, trials=10,
+         num_tests=5, max_eps=20, beta=1):
 
     print("Testing the PPI dataset")
     data = lg.load_ppi()
@@ -160,6 +176,8 @@ def ppi(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
     global train_settings
     train_settings['nw'] = min(nw, 5)
     train_settings['wl'] = min(wl, 20)
+    #train_settings['sample_size'] = 8
+    train_settings['verbose'] = 2
 
     return generic_test(
         data, 
@@ -167,11 +185,13 @@ def ppi(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
         num_tests,
         max_eps,
         agent_params=agent_params,
-        train_settings=train_settings
+        train_settings=train_settings,
+        preprocess=False,
+        multiclass=True
     )
 
-def reddit(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
-         num_tests=5, max_eps=20, beta=0.25):
+def reddit(gamma=1-1e-3, nw=10, wl=5, epsilon=0.99, trials=10,
+         num_tests=5, max_eps=20, beta=0):
 
     print("Testing the PPI dataset")
     data = lg.load_reddit()
@@ -190,6 +210,8 @@ def reddit(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
     global train_settings
     train_settings['nw'] = min(nw, 5)
     train_settings['wl'] = min(wl, 20)
+    train_settings['sample_size'] = 1000
+    train_settings['verbose'] = 2
 
     return generic_test(
         data,
@@ -197,7 +219,8 @@ def reddit(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
         num_tests,
         max_eps,
         agent_params=agent_params,
-        train_settings=train_settings
+        train_settings=train_settings,
+        undirected=False
     )
 
 def cora(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10, 
@@ -293,5 +316,5 @@ def test_epsilon_cora():
         print('(%0.3f) Epsilon: %d' % (acc, i))
 
 if __name__ == '__main__':
-    #ppi()
-    reddit()
+    ppi()
+    #reddit()
