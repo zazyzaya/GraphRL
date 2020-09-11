@@ -59,7 +59,7 @@ train_settings = dict(
     early_stopping=0.001,
     nw=5,
     wl=20,
-    epochs=200,
+    epochs=2,
     sample_size=None,
     lr=1e-5
 )
@@ -88,6 +88,7 @@ def generic_test(data, trials, num_tests, max_eps, agent_params=default_agent_pa
             agent_params['gamma']
         )
     )
+    nw = train_settings['nw']
     for i in range(0,nw+1,nw//num_tests):
         print()
         eps = (i/nw) * max_eps
@@ -139,6 +140,66 @@ def citeseer(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
         train_settings=train_settings
     )
 
+def ppi(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
+         num_tests=5, max_eps=20, beta=0.25):
+
+    print("Testing the PPI dataset")
+    data = lg.load_ppi()
+    print(data.x.size())
+
+    agent_params = dict(
+        episode_len=wl,
+        num_walks=nw,
+        epsilon=lambda x : epsilon,
+        gamma=gamma,
+        hidden=2048,
+        one_hot=True,
+        beta=beta
+    )
+
+    global train_settings
+    train_settings['nw'] = min(nw, 5)
+    train_settings['wl'] = min(wl, 20)
+
+    return generic_test(
+        data, 
+        trials, 
+        num_tests,
+        max_eps,
+        agent_params=agent_params,
+        train_settings=train_settings
+    )
+
+def reddit(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
+         num_tests=5, max_eps=20, beta=0.25):
+
+    print("Testing the PPI dataset")
+    data = lg.load_reddit()
+    print(data.x.size())
+
+    agent_params = dict(
+        episode_len=wl,
+        num_walks=nw,
+        epsilon=lambda x : epsilon,
+        gamma=gamma,
+        hidden=2048,
+        one_hot=True,
+        beta=beta
+    )
+
+    global train_settings
+    train_settings['nw'] = min(nw, 5)
+    train_settings['wl'] = min(wl, 20)
+
+    return generic_test(
+        data,
+        trials,
+        num_tests,
+        max_eps,
+        agent_params=agent_params,
+        train_settings=train_settings
+    )
+
 def cora(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10, 
          num_tests=5, max_eps=20, beta=0.25):
     
@@ -170,7 +231,8 @@ def cora(gamma=1-1e-3, nw=10, wl=7, epsilon=0.99, trials=10,
 
 from sklearn.decomposition import PCA
 def preprocess(X):
-    decomp = PCA(n_components=256, random_state=1337)
+    n_components = min(256, X.size()[1])
+    decomp = PCA(n_components=n_components, random_state=1337)
     return torch.tensor(decomp.fit_transform(X.numpy()))
 
 class Be_Quiet():
@@ -231,4 +293,5 @@ def test_epsilon_cora():
         print('(%0.3f) Epsilon: %d' % (acc, i))
 
 if __name__ == '__main__':
-    citeseer()
+    #ppi()
+    reddit()

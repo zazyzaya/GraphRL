@@ -4,6 +4,8 @@ import pandas as pd
 from torch_geometric.data import Data 
 from torch_geometric.utils import add_remaining_self_loops
 
+from torch_geometric.datasets import PPI,Reddit
+
 # File locations
 DATA = '/mnt/raid0_24TB/datasets/'
 CORA = DATA + 'cora/'
@@ -145,3 +147,18 @@ def load_citeseer():
         x=x,
         y=y
     )
+
+
+
+def load_ppi():
+    print("Loading ppi...")
+    root='/tmp/ppi'
+    d = PPI(root=root).data
+    return d
+
+
+def load_reddit():
+    print("Loading reddit...")
+    root='/tmp/reddit'
+    d = Reddit(root=root).data
+    return d
