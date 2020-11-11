@@ -17,7 +17,7 @@ from sklearn.metrics import classification_report, accuracy_score
 from sklearn.multiclass import OneVsRestClassifier as OVR
 from sklearn.linear_model import LogisticRegression as LR
 from torch_geometric.utils import degree
-from rl_module import Q_Walker, RW_Encoder, train_loop
+from rl_module_single_file import Q_Walker, RW_Encoder, train_loop
 
 default_agent_params = dict(
     episode_len=20,
@@ -45,6 +45,12 @@ w2v_params = dict(
     negative=10,
     window=10
 )
+
+from sklearn.decomposition import PCA
+def pca(X, dim=256):
+    n_components = min(dim, X.size()[1])
+    decomp = PCA(n_components=n_components, random_state=1337)
+    return torch.tensor(decomp.fit_transform(X.numpy()))
 
 def generic_test(data, trials, num_tests, max_eps, agent_params=default_agent_params,
                  train_settings=train_settings, undirected=True, preprocess=True,
@@ -135,13 +141,14 @@ def citeseer(gamma=0.99, nw=5, wl=20, epsilon=0.5, trials=5,
     print("Testing the Citeseer dataset")
     data = lg.load_citeseer()
     
-    global default_agent_params
-    agent_params = default_agent_params
-    agent_params['episode_len'] = wl
-    agent_params['num_walks'] = nw
-    agent_params['epsilon'] = lambda x : epsilon 
-    agent_params['gamma'] = gamma
-    agent_params['beta'] = beta
+    agent_params = dict(
+        episode_len=wl,
+        num_walks=nw,
+        epsilon=lambda x : epsilon,
+        gamma=gamma,
+        hidden=2048,
+        beta=beta
+    )
     
     global train_settings  
     train_settings['train_eps'] = epsilon  
@@ -157,115 +164,4 @@ def citeseer(gamma=0.99, nw=5, wl=20, epsilon=0.5, trials=5,
         undirected=True
     )
 
-def ppi(gamma=1-1e-3, nw=5, wl=10, epsilon=0.95, trials=10,
-         num_tests=5, max_eps=25, beta=1):
-
-    print("Testing the PPI dataset")
-    data = lg.load_ppi()
-    print(data.x.size())
-
-    global default_agent_params
-    agent_params = default_agent_params
-    agent_params['episode_len'] = wl
-    agent_params['num_walks'] = nw
-    agent_params['epsilon'] = lambda x : epsilon 
-    agent_params['gamma'] = gamma
-    agent_params['beta'] = beta
-
-    global train_settings
-    train_settings['nw'] = min(nw, 5)
-    train_settings['wl'] = min(wl, 20)
-    #train_settings['sample_size'] = 8
-    train_settings['verbose'] = 2
-
-    return generic_test(
-        data, 
-        trials, 
-        num_tests,
-        max_eps,
-        agent_params=agent_params,
-        train_settings=train_settings,
-        preprocess=False,
-        multiclass=True
-    )
-
-def reddit(gamma=1-1e-3, nw=10, wl=5, epsilon=0.99, trials=10,
-         num_tests=5, max_eps=20, beta=0):
-
-    print("Testing the Reddit dataset")
-    data = lg.load_reddit()
-    print(data.x.size())
-
-    global default_agent_params
-    agent_params = default_agent_params
-    agent_params['episode_len'] = wl
-    agent_params['num_walks'] = nw
-    agent_params['epsilon'] = lambda x : epsilon 
-    agent_params['gamma'] = gamma
-    agent_params['beta'] = beta
-
-    global train_settings
-    train_settings['nw'] = min(nw, 5)
-    train_settings['wl'] = min(wl, 20)
-    train_settings['sample_size'] = 1000
-    train_settings['verbose'] = 2
-
-    return generic_test(
-        data,
-        trials,
-        num_tests,
-        max_eps,
-        agent_params=agent_params,
-        train_settings=train_settings,
-        undirected=False
-    )
-
-def cora(gamma=0.8, nw=5, wl=10, epsilon=0.5, trials=5, 
-         num_tests=7, max_eps=35, beta=0):
-    
-    print("Testing the CORA dataset")
-    data = lg.load_cora()
-    
-    global default_agent_params
-    agent_params = default_agent_params
-    agent_params['episode_len'] = wl
-    agent_params['num_walks'] = nw
-    agent_params['epsilon'] = lambda x : epsilon 
-    agent_params['gamma'] = gamma
-    agent_params['beta'] = beta
-    
-    global train_settings
-    train_settings['train_eps'] = epsilon  
-    train_settings['nw'] = 2
-    train_settings['epochs'] = 75
-    
-    return generic_test(
-        data, 
-        trials, 
-        num_tests,
-        max_eps,
-        agent_params=agent_params, 
-        train_settings=train_settings,
-        #undirected=False
-    ) 
-
-from sklearn.decomposition import PCA
-def pca(X, dim=256):
-    n_components = min(dim, X.size()[1])
-    decomp = PCA(n_components=n_components, random_state=1337)
-    return torch.tensor(decomp.fit_transform(X.numpy()))
-
-class Be_Quiet():
-    def __init__(self):
-        pass
-    def flush(self, **kwargs):
-        pass
-    def write(self, *args):
-        pass
-
-
-if __name__ == '__main__':
-    #ppi()
-    #reddit()
-    cora()
-    #citeseer()
+citeseer()

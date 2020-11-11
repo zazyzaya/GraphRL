@@ -143,6 +143,8 @@ def load_citeseer():
         dtype=torch.long
     )
     
+    ei = add_remaining_self_loops(ei)[0]
+
     return Data(
         edge_index=ei,
         x=x,

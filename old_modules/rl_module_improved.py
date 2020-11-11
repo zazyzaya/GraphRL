@@ -90,6 +90,9 @@ class Q_Walker_Improved(Q_Walker):
     def value_estimation(self, s, nids):
         with torch.no_grad():
             est = (self.qNet(s) * torch.clamp(self.action_map[nids]+1, max=1))
+            
+            # Discourage self loops
+            est[self.action_map[nids] == nids.unsqueeze(-1)] = 0
         return est
         
     '''
@@ -250,6 +253,8 @@ class Q_Walk_Simplified(Q_Walker_Improved):
         
         self.one_hot = one_hot
         self.cs = torch.nn.CosineSimilarity()
+        self.infintessimal = 0
+        self.ei_len = None
         
         # Don't bother with node features at all 
         # Make sure to update state/action transition functions accordingly
@@ -279,18 +284,24 @@ class Q_Walk_Simplified(Q_Walker_Improved):
             return super().encode_actions(actions)
         
     def remove_direction(self):
-        self.data.edge_index = torch.cat(
+        self.ei_len = self.data.edge_index.size()[1]
+        new_ei = torch.cat(
             [
                 self.data.edge_index, 
                 self.data.edge_index[torch.tensor([1,0]), :]
             ], dim=1)
         
-        pass
+        # Remove duped self loops
+        dupes = new_ei[0,:]==new_ei[1,:]
+        dupes[:self.ei_len] = False 
+        new_ei = new_ei[:, ~dupes]
+
+        self.data.edge_index = new_ei
         
     def repair_edge_index(self):
         self.data.edge_index = self.data.edge_index[
             :, 
-            :self.data.edge_index.size()[1]//2
+            :self.ei_len
         ]
         
     def min_sim_reward(self, s,a,s_prime,nid):
@@ -300,7 +311,7 @@ class Q_Walk_Simplified(Q_Walker_Improved):
         sim = self.cs(self.data.x[nid],self.data.x[a]).unsqueeze(-1)
         
         # Punish returning walking toward "yourself"
-        sim[sim==1] = 0
+        sim[sim==1] = self.infintessimal
         
         return sim 
     
@@ -368,5 +379,5 @@ class Q_Walk_Simplified(Q_Walker_Improved):
             (dst >= 0).sum(axis=1, keepdim=True)
         )
         
-        ret[nid == a] = 0
+        ret[nid == a] = self.infintessimal
         return ret
