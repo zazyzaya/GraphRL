@@ -184,8 +184,11 @@ class Q_Walker():
     return the next nid to walk to if following user defined policy 
     in ['egreedy', 'weighted', 'perfect'], else uses random
     '''        
-    def policy(self, s, nids, strategy='weighted', return_nids=False, return_both=False):
-        value_estimates = self.value_estimation(s, nids)
+    def policy(self, s, nids, strategy='weighted', return_nids=False, 
+                return_both=False, value_estimates=None):
+        
+        if type(value_estimates) == type(None):
+            value_estimates = self.value_estimation(s, nids)
         
         # If weighted_rand, it's pretty simple, just select the neighbor based on
         # the values the Q Net assigns each possible action 
@@ -253,10 +256,15 @@ class Q_Walker():
     '''
     def generate_walks(self, nids, strategy='random', silent=False, strings=True):
         walks = []
-        node = nids
+        og_nids = nids
+
         for _ in tqdm(range(self.num_walks), desc='Walks generated', disable=silent):
+            nids = og_nids
             walk = [nids]
             s = self.state_transition(nids)
+
+            print("Testing: delete me (rl_mod.py line 266)")
+            print(nids[:10])
             
             with torch.no_grad():
                 for _ in range(self.episode_len):
